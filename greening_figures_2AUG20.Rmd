@@ -1,0 +1,190 @@
+---
+title: "Spatial_figures"
+output:
+  word_document: default
+  pdf_document:
+    fig_height: 6
+    fig_width: 8
+  html_document: default
+editor_options:
+  chunk_output_type: inline
+---
+
+#### IMPORTANT NOTE: If you wish to have the combined figure in this doc then you have the 'resprout_failure' markdown first. Until I figure out how to save and load ggplot images easily....
+
+
+```{r setup, include=TRUE, message=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.width=8, fig.height=6)
+
+library(here)
+library(dplyr)
+library(ggplot2)
+library(mgcv)
+library(readxl)
+library(stringr)
+library(tidyr)
+library(bayesplot)
+library(brms)
+library(tidybayes)
+library(RColorBrewer)
+library(rstan)
+library(splines)
+library(forcats)
+library(ggthemes)
+library(ggpubr)
+library(egg)
+
+#These options help Stan run faster:
+
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+
+# Make sure the scales package is available (it should be if ggplot is installed)
+requireNamespace("scales")
+
+# Default graph theme - white background
+theme_set( theme_bw() )
+
+set.seed(42)
+
+
+# Set to TRUE to force models to be refitted
+REFIT_MODELS <- FALSE
+
+
+# Create a folder for fitted models if one does not already exist
+FittedModelsPath <- here("fitted_models")
+if (!dir.exists(FittedModelsPath)) {
+  dir.create(FittedModelsPath)
+}
+
+
+# Load brms if it is installed (requires Stan software and the rstan package).
+# If not installed, HAS_BRMS will be set to FALSE.
+HAS_BRMS <- suppressWarnings(
+  require("brms", quietly = TRUE)
+)
+
+
+###### Some helper functions #####
+
+# Calculate standard page sizes
+pagesize <- function(size = c("A4", "A3", "A2", "A1", "A0"), 
+                     orientation = c("portrait", "landscape"),
+                     units = c("cm", "mm")) {
+  
+  size <- match.arg(size)
+  orientation <- match.arg(orientation)
+  units <- match.arg(units)
+  
+  alpha <- 1000 * 2^(1/4)
+  i <- as.integer(substr(size, 2, 2))
+  long <- alpha * 2^(-i/2)
+  
+  page <- switch(
+    orientation,
+    portrait = c(width = long / sqrt(2), height = long),
+    landscape = c(width = long, height = long / sqrt(2))
+  )
+  
+  page <- round(page)
+  if (units == "cm") page <- page / 10
+  
+  page <- c(as.list(page), units = units)
+  class(page) <- "pagesize"
+  
+  page
+}
+
+
+
+# Save a graph to a PDF file
+gg_pdf <- function(plot, filename, size = pagesize("A4", "landscape", "cm")) {
+  
+  if (!inherits(size, "pagesize")) stop("The size argument should be a pagesize (list) object")
+  
+  ggsave(
+    filename, 
+    plot, 
+    width = size$width,
+    height = size$height,
+    units = size$units)
+}
+
+
+# Calculate highest posterior density interval for a vector of values
+hpdi.vec <- function (x, prob = 0.95) {
+  n <- length(x)
+  if (n <= 1) stop("x must have more than 1 element")
+  x <- sort(x)
+
+  gap <- max(1, min(n - 1, round(n * prob)))
+  init <- 1:(n - gap)
+
+  inds <- which.min(x[init + gap] - x[init])
+
+  out <- c(lower = x[inds], upper = x[inds + gap])
+  out
+}
+
+
+```
+
+```{r}
+combined_dens_plot <- egg::ggarrange(dens.SYD.DSF, dens.SYD.WSF, dens.SEC.DSF, dens.SEC.WSF, ncol = 2, nrow = 2) 
+
+  
+
+ggsave("combined_dens_plot.png")
+
+combined_dens_plot
+```
+
+
+```{r fig.height = 7, fig.width = 7}
+
+combined_greening_plot_sub_DSF <- egg::ggarrange(DSF.plot.mar.SYD, DSF.plot.mat.SYD, DSF.plot.mar.SEC, DSF.plot.mat.SEC, ncol = 2, nrow = 2) 
+
+combined_greening_plot_sub_DSF <- annotate_figure(combined_greening_plot_sub_DSF, bottom = text_grob(""), left = text_grob(bquote(bold('PG'[i])), face = "bold", rot = 90, vjust = 0.5, hjust = -0.5, size = 12), right = text_grob("SYD                                                                    SEC", face = "bold", rot = 270, size = 12, hjust = 0.58, vjust = 0.2))
+  
+
+ggsave("combined_greening_plot_sub_DSF.png")
+
+combined_greening_plot_sub_DSF
+```
+
+```{r fig.height = 7, fig.width = 7}
+
+combined_greening_plot_sub_WSF <- egg::ggarrange(WSF.plot.mar.SYD, WSF.plot.mat.SYD, WSF.plot.mar.SEC, WSF.plot.mat.SEC, ncol = 2, nrow = 2) 
+
+combined_greening_plot_sub_WSF <- annotate_figure(combined_greening_plot_sub_WSF, bottom = text_grob(""), left = text_grob(bquote(bold('PG'[i])), face = "bold", rot = 90, vjust = 0.5, hjust = -0.5, size = 12), right = text_grob("SYD                                                                    SEC", face = "bold", rot = 270, size = 12, hjust = 0.58, vjust = 0.2))
+  
+
+ggsave("combined_greening_plot_sub_WSF.png")
+
+combined_greening_plot_sub_WSF
+```
+
+```{r fig.height = 7, fig.width = 7}
+
+combined_greening_plot_main_WSF <- egg::ggarrange(WSF.plot.tsfdi.SYD, WSF.plot.tsd.SYD, WSF.plot.tsfdi.SEC, WSF.plot.tsd.SEC, ncol = 2, nrow = 2) 
+
+combined_greening_plot_main_WSF <- annotate_figure(combined_greening_plot_main_WSF, bottom = text_grob(""), left = text_grob(bquote(bold('PG'[i])), face = "bold", rot = 90, vjust = 0.5, hjust = -0.5, size = 12), right = text_grob("SYD                                                                 SEC", face = "bold", rot = 270, size = 12, hjust = 0.59, vjust = 0.2))
+  
+
+ggsave("combined_greening_plot_main_WSF.png")
+
+combined_greening_plot_main_WSF
+```
+
+```{r fig.height = 7, fig.width = 7}
+
+combined_greening_plot_main_DSF <- egg::ggarrange(DSF.plot.tsfdi.SYD, DSF.plot.tsd.SYD, DSF.plot.tsfdi.SEC, DSF.plot.tsd.SEC, ncol = 2, nrow = 2) 
+
+combined_greening_plot_main_DSF <- annotate_figure(combined_greening_plot_main_DSF, bottom = text_grob(""), left = text_grob(bquote(bold('PG'[i])), face = "bold", rot = 90, vjust = 0.5, hjust = -0.5, size = 12), right = text_grob("SYD                                                                 SEC", face = "bold", rot = 270, size = 12, hjust = 0.59, vjust = 0.2))
+  
+
+ggsave("combined_greening_plot_main_DSF.png")
+
+combined_greening_plot_main_DSF
+```

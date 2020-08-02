@@ -1,0 +1,350 @@
+---
+title: "Greening_diagram"
+author: "E. Bendall"
+date: "27/06/2020"
+output:
+  word_document: default
+  pdf_document:
+    fig_height: 6
+    fig_width: 8
+  html_document: default
+editor_options:
+  chunk_output_type: inline
+---
+
+```{r setup, include=TRUE, message=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(here)
+library(dplyr)
+library(ggplot2)
+library(readxl)
+library(stringr)
+library(tidyr)
+library(stats)
+library(purrr)
+library(rstan)
+library(brms)
+library(mgcv)
+library(future)
+library(ggthemes)
+library(ggpubr)
+library(egg)
+
+#spatial library
+library(class)
+library(spdep)
+library(RANN)
+library(sf)
+library(sp)
+library(lwgeom)
+library(spatialEco)
+
+
+#These options help Stan run faster:
+
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+
+# Make sure the scales package is available (it should be if ggplot is installed)
+requireNamespace("scales")
+
+# Default graph theme - white background
+theme_set( theme_bw() )
+
+set.seed(42)
+
+###### Some helper functions #####
+
+# Calculate standard page sizes
+pagesize <- function(size = c("A4", "A3", "A2", "A1", "A0"), 
+                     orientation = c("portrait", "landscape"),
+                     units = c("cm", "mm")) {
+  
+  size <- match.arg(size)
+  orientation <- match.arg(orientation)
+  units <- match.arg(units)
+  
+  alpha <- 1000 * 2^(1/4)
+  i <- as.integer(substr(size, 2, 2))
+  long <- alpha * 2^(-i/2)
+  
+  page <- switch(
+    orientation,
+    portrait = c(width = long / sqrt(2), height = long),
+    landscape = c(width = long, height = long / sqrt(2))
+  )
+  
+  page <- round(page)
+  if (units == "cm") page <- page / 10
+  
+  page <- c(as.list(page), units = units)
+  class(page) <- "pagesize"
+  
+  page
+}
+
+
+
+# Save a graph to a PDF file
+gg_pdf <- function(plot, filename, size = pagesize("A4", "landscape", "cm")) {
+  
+  if (!inherits(size, "pagesize")) stop("The size argument should be a pagesize (list) object")
+  
+  ggsave(
+    filename, 
+    plot, 
+    width = size$width,
+    height = size$height,
+    units = size$units)
+}
+
+
+# Calculate highest posterior density interval for a vector of values
+hpdi.vec <- function (x, prob = 0.95) {
+  n <- length(x)
+  if (n <= 1) stop("x must have more than 1 element")
+  x <- sort(x)
+
+  gap <- max(1, min(n - 1, round(n * prob)))
+  init <- 1:(n - gap)
+
+  inds <- which.min(x[init + gap] - x[init])
+
+  out <- c(lower = x[inds], upper = x[inds + gap])
+  out
+}
+
+
+```
+
+
+```{r}
+### Create data
+
+### relationship
+
+rel1 <- data.frame(
+      tsf = c(1),
+      greening = c(9))
+
+rel1 <- data.frame(
+      tsf = c(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11),
+      greening = c(1, 2, 3, 4, 5, 6, 7, 8, 9, 9, 9))
+
+rel3 <- data.frame(
+      tsf = c(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11),
+      greening = c(1, 2, 3, 4, 5, 6, 7, 8, 9, 9, 9))
+
+rel4 <- data.frame(
+      tsf = c(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11),
+      greening = c(1, 2, 3, 4, 5, 6, 7, 8, 9, 9, 9))
+
+rel5 <- data.frame(
+      tsf = c(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11),
+      greening = c(1, 2, 3, 4, 5, 6, 7, 8, 9, 9, 9))
+
+rel6 <- data.frame(
+      tsf = c(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11),
+      greening = c(1, 2, 3, 4, 5, 6, 7, 8, 9, 9, 9))
+
+
+
+
+### effect
+
+eff1 <- data.frame(
+      tsf = c(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11),
+      greening = c(1, 2, 3, 4, 5, 6, 7, 8, 9, 9, 9))
+
+eff2 <- data.frame(
+      tsf = c(1, 8, 9, 11),
+      greening = c(6.5, 7.5, 7.5, 7.5))
+
+eff23 <- data.frame(
+      tsf = c(1, 11),
+      greening = c(6.5, 6.5))
+
+
+
+
+```
+
+```{r fig.height = 3, fig.width = 4}
+xtext <- c("no scar", "scar", "no scar", "scar", "no scar", "scar", "no scar", "scar")
+ytext <- c("Pole-sized")
+lines <- c("solid", "dashed", "dotted", "longdash")
+My_Theme = theme(
+  plot.title = element_text(size = 12, face = "bold", hjust = 0.5),
+  axis.title.y = element_text(size = 12, face = "bold"),
+  axis.text.y = element_blank(),
+  axis.text.x = element_blank(),
+  axis.title.x = element_text(size = 11, face = "bold", vjust = -0.5),
+  strip.text.x = element_text(size = 11),
+  strip.text.y = element_text(size = 11),
+  strip.text = element_text(size = 11),
+  strip.background = element_rect(fill = "transparent"),
+  panel.background = element_rect(fill = "transparent"),
+  plot.background = element_rect(fill = "transparent", color = NA),
+  strip.placement = "inside",
+  axis.ticks.length = unit(-0.07, "cm"),
+  axis.ticks = element_line(size = 0.8),
+  axis.ticks.x.top = element_line(size = 0.8),
+  panel.grid.minor.x = element_blank(),
+  panel.grid.major.x = element_blank(),
+  panel.grid.minor.y = element_blank(),
+  panel.grid.major.y = element_blank(),
+  legend.position = c(0.150, 0.70),
+  legend.title = element_text(size = 9, hjust = 0.6, face = "bold"),
+  legend.text = element_text(size = 9),
+  legend.key.width = unit(0.3, "cm"),
+  legend.key.height = unit(0.5, "cm"),
+  legend.background = element_blank(),
+  plot.margin = unit(c(2, 2, 2, 2), "pt"))
+
+concept.plot.1 <- ggplot(data = rel1, aes(y= greening, x = tsf)) +
+  
+   My_Theme +
+  
+  #geom_curve(aes(y = greening, x = tsf, xend = 9, yend = 1), color = "navyblue", size = 2, alpha = 0.7) +
+
+  
+  scale_x_continuous(breaks = c(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11)) +
+  
+  labs(y = "", x = "") 
+  
+    #coord_cartesian(xlim = c(1, 11), ylim = c(1, 11)) +
+
+concept.plot.1
+```
+```{r fig.height = 3, fig.width = 4}
+xtext <- c("no scar", "scar", "no scar", "scar", "no scar", "scar", "no scar", "scar")
+ytext <- c("Pole-sized")
+lines <- c("solid", "dashed", "dotted", "longdash")
+My_Theme = theme(
+  plot.title = element_text(size = 12, face = "bold", hjust = 0.5),
+  axis.title.y = element_text(size = 12, face = "bold"),
+  axis.text.y = element_blank(),
+  axis.text.x = element_blank(),
+  axis.title.x = element_text(size = 11, face = "bold", vjust = -0.5),
+  strip.text.x = element_text(size = 11),
+  strip.text.y = element_text(size = 11),
+  strip.text = element_text(size = 11),
+  strip.background = element_rect(fill = "transparent"),
+  panel.background = element_rect(fill = "transparent"),
+  plot.background = element_rect(fill = "transparent", color = NA),
+  strip.placement = "inside",
+  axis.ticks.length = unit(-0.07, "cm"),
+  axis.ticks = element_line(size = 0.8),
+  axis.ticks.x.top = element_line(size = 0.8),
+  panel.grid.minor.x = element_blank(),
+  panel.grid.major.x = element_blank(),
+  panel.grid.minor.y = element_blank(),
+  panel.grid.major.y = element_blank(),
+  legend.position = c(0.150, 0.70),
+  legend.title = element_text(size = 9, hjust = 0.6, face = "bold"),
+  legend.text = element_text(size = 9),
+  legend.key.width = unit(0.3, "cm"),
+  legend.key.height = unit(0.5, "cm"),
+  legend.background = element_blank(),
+  plot.margin = unit(c(2, 2, 2, 2), "pt"))
+
+concept.plot.2 <- ggplot(data = rel1, aes(y= greening, x = tsf)) +
+  
+   My_Theme +
+  
+  #geom_curve(aes(y = greening, x = tsf, xend = 9, yend = 1), color = "navyblue", size = 2, alpha = 0.7) +
+
+  
+  scale_x_continuous(breaks = c(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11)) +
+  
+  labs(y = "\n\n", x = "") 
+  
+    #coord_cartesian(xlim = c(1, 11), ylim = c(1, 11)) +
+
+concept.plot.2
+```
+
+```{r fig.height = 3, fig.width = 4}
+xtext <- c("no scar", "scar", "no scar", "scar", "no scar", "scar", "no scar", "scar")
+ytext <- c("Pole-sized")
+lines <- c("solid", "dashed", "dotted", "longdash")
+My_Theme = theme(
+  plot.title = element_text(size = 12, face = "bold", hjust = 0.5),
+  axis.title.y = element_text(size = 12, face = "bold"),
+  axis.text.y = element_blank(),
+  axis.text.x = element_blank(),
+  axis.title.x = element_text(size = 11, face = "bold", vjust = -0.5),
+  strip.text.x = element_text(size = 11),
+  strip.text.y = element_text(size = 11),
+  strip.text = element_text(size = 11),
+  strip.background = element_rect(fill = "transparent"),
+  panel.background = element_rect(fill = "transparent"),
+  plot.background = element_rect(fill = "transparent", color = NA),
+  strip.placement = "inside",
+  axis.ticks.length = unit(-0.07, "cm"),
+  axis.ticks = element_line(size = 0.8),
+  axis.ticks.x.top = element_line(size = 0.8),
+  panel.grid.minor.x = element_blank(),
+  panel.grid.major.x = element_blank(),
+  panel.grid.minor.y = element_blank(),
+  panel.grid.major.y = element_blank(),
+  legend.position = c(0.150, 0.70),
+  legend.title = element_text(size = 9, hjust = 0.6, face = "bold"),
+  legend.text = element_text(size = 9),
+  legend.key.width = unit(0.3, "cm"),
+  legend.key.height = unit(0.5, "cm"),
+  legend.background = element_blank(),
+  plot.margin = unit(c(2, 2, 2, 2), "pt"))
+
+concept.plot.3 <- ggplot() +
+  
+   My_Theme +
+  
+  #geom_line(data = scen1, aes(y = greening, x = tsf), color = "navyblue", size = 2, alpha = 0.7) +
+  
+  #geom_line(data = scen2, aes(y = greening, x = tsf), color = "darkorchid4", size = 2, alpha = 0.7) +
+  
+  #geom_line(data = scen2alt, aes(y = greening, x = tsf), color = "darkorchid4", size = 0.5, alpha = 0.7, linetype = "dashed") +
+  
+  geom_line(data = scen3, aes(y = greening, x = tsf), color = "orangered3", size = 2, alpha = 0.7) +
+  
+  geom_line(data = scen3alt, aes(y = greening, x = tsf), color = "orangered3", size = 0.5, alpha = 0.7, linetype = "dashed") +
+  
+  scale_x_continuous(sec.axis = dup_axis(), breaks = c(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11)) +
+  
+  labs(y = "", x = "") +
+  
+    coord_cartesian(xlim = c(1, 11), ylim = c(1, 11)) +
+  
+  
+  
+  geom_hline(yintercept = 6, linetype = "dotted", size = 0.6, colour = "black") 
+  
+#ggsave("concept.plot.png", bg = "transparent")
+
+concept.plot.3
+```
+
+
+
+
+
+
+```{r fig.height = 4, fig.width = 3.25}
+
+
+
+concept.plot.all <- egg::ggarrange(concept.plot.1, concept.plot.2, concept.plot.1, concept.plot.2, concept.plot.1, concept.plot.2, ncol = 2, nrow = 3) 
+
+concept.plot.all <- annotate_figure(concept.plot.all)
+  
+
+ggsave("concept.plot.all.png", plot = concept.plot.all, bg = "transparent")
+
+concept.plot.all
+```
+
+
+
+

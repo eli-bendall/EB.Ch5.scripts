@@ -1,0 +1,411 @@
+---
+title: "SECBIO_pre-processing"
+author: "E Bendall"
+date: "02/08/2020"
+output: html_document
+---
+
+```{r setup, include=TRUE, message=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(here)
+library(dplyr)
+library(ggplot2)
+library(readxl)
+library(stringr)
+library(tidyr)
+library(stats)
+library(purrr)
+library(rstan)
+library(brms)
+library(mgcv)
+
+#spatial library
+library(class)
+library(spdep)
+library(RANN)
+library(sf)
+library(lwgeom)
+library(rgdal)
+library(raster)
+library(fasterize)
+library(dismo)
+
+
+#These options help Stan run faster:
+
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+
+# Make sure the scales package is available (it should be if ggplot is installed)
+requireNamespace("scales")
+
+# Default graph theme - white background
+theme_set( theme_bw() )
+
+set.seed(42)
+
+
+# Set to TRUE to force models to be refitted
+REFIT_MODELS <- FALSE
+
+
+# Create a folder for fitted models if one does not already exist
+FittedModelsPath <- here("fitted_models_SYDBIO")
+if (!dir.exists(FittedModelsPath)) {
+  dir.create(FittedModelsPath)
+}
+
+
+# Load brms if it is installed (requires Stan software and the rstan package).
+# If not installed, HAS_BRMS will be set to FALSE.
+HAS_BRMS <- suppressWarnings(
+  require("brms", quietly = TRUE)
+)
+
+
+###### Some helper functions #####
+
+# Calculate standard page sizes
+pagesize <- function(size = c("A4", "A3", "A2", "A1", "A0"), 
+                     orientation = c("portrait", "landscape"),
+                     units = c("cm", "mm")) {
+  
+  size <- match.arg(size)
+  orientation <- match.arg(orientation)
+  units <- match.arg(units)
+  
+  alpha <- 1000 * 2^(1/4)
+  i <- as.integer(substr(size, 2, 2))
+  long <- alpha * 2^(-i/2)
+  
+  page <- switch(
+    orientation,
+    portrait = c(width = long / sqrt(2), height = long),
+    landscape = c(width = long, height = long / sqrt(2))
+  )
+  
+  page <- round(page)
+  if (units == "cm") page <- page / 10
+  
+  page <- c(as.list(page), units = units)
+  class(page) <- "pagesize"
+  
+  page
+}
+
+
+
+# Save a graph to a PDF file
+gg_pdf <- function(plot, filename, size = pagesize("A4", "landscape", "cm")) {
+  
+  if (!inherits(size, "pagesize")) stop("The size argument should be a pagesize (list) object")
+  
+  ggsave(
+    filename, 
+    plot, 
+    width = size$width,
+    height = size$height,
+    units = size$units)
+}
+
+
+# Calculate highest posterior density interval for a vector of values
+hpdi.vec <- function (x, prob = 0.95) {
+  n <- length(x)
+  if (n <= 1) stop("x must have more than 1 element")
+  x <- sort(x)
+
+  gap <- max(1, min(n - 1, round(n * prob)))
+  init <- 1:(n - gap)
+
+  inds <- which.min(x[init + gap] - x[init])
+
+  out <- c(lower = x[inds], upper = x[inds + gap])
+  out
+}
+
+
+
+
+
+```
+
+
+### Read in shapefiles
+
+```{r}
+bioregion <- st_read("IBRA_SEC_DISS.shp")
+
+vegshp <- st_read("SECregion_veg_MAY2020.shp")
+
+npws <- st_read("NPWS_Estate2012.shp")
+
+parkres <- st_read("parkres.shp")
+```
+
+
+### Read in rasters
+
+```{r}
+firefrequency <- raster("SECregion_FF_APR5th_1.tif")
+
+green <- raster("SECregion_green_APR5th.tif")
+
+TSD <- raster("SECregion_TSD_1990_2017-1.5.tif")
+
+TSFDI <- raster("SECregion_TSFDI_comb_14JUL2020.tif")
+
+bio01 <- raster("CM10_1975H_Bio01_V1.2.txt")
+
+bio12 <- raster("CM10_1975H_Bio12_V1.2.txt")
+```
+
+
+### check/set CRS
+
+```{r}
+### bioclim layers have no crs, so here we match them with the other layers
+
+crs(bio01) <- crs("+proj=longlat +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +no_defs") 
+
+crs(bio12) <- crs("+proj=longlat +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +no_defs") 
+
+st_crs(parkres) = 4283
+
+st_crs(npws) = 4283
+
+bioregion <- st_transform(bioregion, "+proj=longlat +ellps=GRS80 +towgs84=0,0,0,0,0,0,0 +no_defs")
+
+st_crs(bioregion) = 4283
+
+
+```
+
+
+```{r}
+
+### select and match column names befor merging
+npws <- npws %>%
+  select(OBJECTID, geometry)
+
+parkres <- parkres %>%
+  select(PRIMS_ID, geometry) %>%
+  mutate(OBJECTID = PRIMS_ID) %>%
+  select(-(PRIMS_ID))
+
+
+### merge
+estate <- rbind(npws, parkres)
+
+### cahnge ow number to ID
+library(tidyverse)
+estate <- rowid_to_column(estate, "ID")
+
+estate <- estate %>%
+  select(-(OBJECTID))
+```
+
+
+### processing steps
+
+```{r}
+library(fasterize)
+
+
+### filter veg shapefile to relevant veg types
+vegshp <- vegshp %>%
+  filter(gridcode == "10"|gridcode == "20") %>%
+  mutate(vegindex = factor(gridcode, levels = c("10", "20"),
+                                           labels = c("1", "2")))
+
+### split veg by type 
+DSFshp <- vegshp %>%
+  filter(vegindex == "1")
+
+WSFshp <- vegshp %>%
+  filter(vegindex == "2")
+
+
+### convert veg to raster
+WSF_30m <- fasterize(WSFshp, firefrequency, field = "vegindex")
+
+DSF_30m <- fasterize(DSFshp, firefrequency, field = "vegindex")
+
+### check distribution of veg values
+#hist(veg, main = "dist of veg values", col = "purple")
+
+
+
+```
+
+```{r}
+### simple way to clip sf to sf object
+estate_sec <- estate[bioregion, ]
+```
+
+
+```{r}
+### Load output rasters from following chunks which have already been created. 
+
+#TSFDI_30m <- raster("TSFDI_30m_SYD.2.grd")
+
+green_30m <- raster("green_30m_SEC.grd")
+
+TSD_30m <- raster("TSD_30m_SEC.grd")
+
+bio01_30m <- raster("bio01_30m_SEC.grd")
+
+bio12_30m <- raster("bio12_30m_SEC.grd")
+
+```
+
+
+
+```{r}#
+### Raster resolution sizes are different. Need to match all to 0.00033
+
+### Resample function for the bigger resolution rasters
+
+TSD_30m <- resample(TSD, firefrequency)
+
+bio01_30m <- resample(bio01, firefrequency)
+  
+bio12_30m <-  resample(bio12, firefrequency) 
+
+df_30m <- resample(df, firefrequency)
+
+### save raster
+writeRaster(TSD_30m, filename = "TSD_30m.grd")
+
+writeRaster(bio01_30m, filename = "bio01_30m.grd")
+
+writeRaster(bio12_30m, filename = "bio12_30m.grd")
+
+writeRaster(df_30m, filename = "df_30m.grd")
+
+
+```
+
+
+
+```{r}
+### Direct aggregation not possible for smaller layer because integer values not possible. Another method:
+#   by layer approach by Robert Hijmans. This step takes several hours 
+
+b <- layerize(TSFDI)
+fact <- round(dim(TSFDI)[1:2] / dim(firefrequency)[1:2])
+a <- aggregate(b, fact)
+x <- resample(a, firefrequency)
+
+### Now working with proportions
+
+y <- which.max(x)
+
+### Aggregate classes
+
+ag <- aggregate(TSFDI, fact, modal)
+agx <- resample(ag, firefrequency, method = 'ngb')
+
+
+### Rename
+
+TSFDI_30m <- agx
+
+### save raster
+writeRaster(TSFDI_30m, filename = "TSFDI_30m_SEC.2.grd")
+```
+
+```{r}#
+# by layer approach by Robert Hijmans. This step takes over 6 hours
+
+b <- layerize(green)
+fact <- round(dim(green)[1:2] / dim(firefrequency)[1:2])
+a <- aggregate(b, fact)
+x <- resample(a, firefrequency)
+
+### Now working with proportions
+
+y <- which.max(x)
+
+### Aggregate classes
+
+ag <- aggregate(green, fact, modal)
+agx <- resample(ag, firefrequency, method = 'ngb')
+
+
+### Rename
+
+green_30m <- agx
+
+### save raster
+writeRaster(green_30m, filename = "green_30m.grd")
+```
+
+```{r}
+### rename other variables for continuity
+
+FF_30m <- firefrequency
+
+
+### sum rasters to find out minimum common bounds between rasters
+
+#raster_comb_DSF <- TSD_30m+FF_30m+green_30m+TSFDI_30m+DSF_30m+bio01_30m+bio12_30m
+
+#raster_comb_WSF <- TSD_30m+FF_30m+green_30m+TSFDI_30m+WSF_30m+bio01_30m+bio12_30m
+
+```
+
+
+```{r}
+### crop all rasters to same extent (npws_SYD)
+
+FF_30m <- crop(FF_30m, estate_sec)
+
+green_30m <- crop(green_30m, estate_sec)
+
+TSD_30m <- crop(TSD_30m, estate_sec)
+
+TSFDI_30m <- crop(TSFDI_30m, estate_sec)
+
+DSF_30m <- crop(DSF_30m, estate_sec)
+
+WSF_30m <- crop(WSF_30m, estate_sec)
+
+bio01_30m <- crop(bio01_30m, estate_sec)
+
+bio12_30m <- crop(bio12_30m, estate_sec)
+
+```
+
+```{r}
+### stack rasters 
+
+DSF.stk <- raster::stack(green_30m, TSD_30m, TSFDI_30m, DSF_30m, bio01_30m, bio12_30m)
+
+WSF.stk <- raster::stack(green_30m, TSD_30m, TSFDI_30m, WSF_30m, bio01_30m, bio12_30m)
+
+
+```
+
+
+```{r}
+### mask out all areas that are not NPWS estate & not within specified veg type
+
+DSF.mask.temp <- mask(x = DSF.stk, mask = estate_sec)
+DSF.mask <- mask(x = DSF.mask.temp, mask = DSF_30m)
+
+
+WSF.mask.temp <- mask(x = WSF.stk, mask = estate_sec)
+WSF.mask <- mask(x = WSF.mask.temp, mask = WSF_30m)
+
+
+### save raster stack
+
+writeRaster(DSF.mask, filename = "DSF.mask.SEC.2.tif", options = "INTERLEAVE=BAND", overwrite = TRUE)
+
+writeRaster(WSF.mask, filename = "WSF.mask.SEC.2.tif", options = "INTERLEAVE=BAND", overwrite = TRUE)
+
+
+```
+

@@ -1,0 +1,325 @@
+---
+title: "SECBIO_models"
+author: "E Bendall & Michael Bedward"
+date: "02/08/2020"
+output: html_document
+---
+
+```{r setup, include=TRUE, message=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(here)
+library(dplyr)
+library(ggplot2)
+library(readxl)
+library(stringr)
+library(tidyr)
+library(stats)
+library(purrr)
+library(rstan)
+library(brms)
+library(mgcv)
+library(future)
+
+#spatial library
+library(class)
+library(spdep)
+library(RANN)
+library(sf)
+library(sp)
+library(lwgeom)
+library(spatialEco)
+
+
+#These options help Stan run faster:
+
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+
+# Make sure the scales package is available (it should be if ggplot is installed)
+requireNamespace("scales")
+
+# Default graph theme - white background
+theme_set( theme_bw() )
+
+set.seed(42)
+
+
+# Set to TRUE to force models to be refitted
+REFIT_MODELS <- FALSE
+
+
+# Create a folder for fitted models if one does not already exist
+FittedModelsPath <- here("fitted_models_SYDBIO")
+if (!dir.exists(FittedModelsPath)) {
+  dir.create(FittedModelsPath)
+}
+
+
+# Load brms if it is installed (requires Stan software and the rstan package).
+# If not installed, HAS_BRMS will be set to FALSE.
+HAS_BRMS <- suppressWarnings(
+  require("brms", quietly = TRUE)
+)
+
+
+###### Some helper functions #####
+
+# Calculate standard page sizes
+pagesize <- function(size = c("A4", "A3", "A2", "A1", "A0"), 
+                     orientation = c("portrait", "landscape"),
+                     units = c("cm", "mm")) {
+  
+  size <- match.arg(size)
+  orientation <- match.arg(orientation)
+  units <- match.arg(units)
+  
+  alpha <- 1000 * 2^(1/4)
+  i <- as.integer(substr(size, 2, 2))
+  long <- alpha * 2^(-i/2)
+  
+  page <- switch(
+    orientation,
+    portrait = c(width = long / sqrt(2), height = long),
+    landscape = c(width = long, height = long / sqrt(2))
+  )
+  
+  page <- round(page)
+  if (units == "cm") page <- page / 10
+  
+  page <- c(as.list(page), units = units)
+  class(page) <- "pagesize"
+  
+  page
+}
+
+
+
+# Save a graph to a PDF file
+gg_pdf <- function(plot, filename, size = pagesize("A4", "landscape", "cm")) {
+  
+  if (!inherits(size, "pagesize")) stop("The size argument should be a pagesize (list) object")
+  
+  ggsave(
+    filename, 
+    plot, 
+    width = size$width,
+    height = size$height,
+    units = size$units)
+}
+
+
+# Calculate highest posterior density interval for a vector of values
+hpdi.vec <- function (x, prob = 0.95) {
+  n <- length(x)
+  if (n <= 1) stop("x must have more than 1 element")
+  x <- sort(x)
+
+  gap <- max(1, min(n - 1, round(n * prob)))
+  init <- 1:(n - gap)
+
+  inds <- which.min(x[init + gap] - x[init])
+
+  out <- c(lower = x[inds], upper = x[inds + gap])
+  out
+}
+
+
+
+
+
+```
+
+
+## Read in data
+
+```{r}
+
+### Load stack
+
+DSF.mask <- raster::stack("DSF.mask.SEC.2.tif")
+
+WSF.mask <- raster::stack("WSF.mask.SEC.2.tif")
+
+### names of .value reflect only the orignal sf object, need to change names of raster value columns for continuity
+
+names(DSF.mask) <- c("green", "TSD", "TSFDI", "veg", "bio01", "bio12")
+
+names(WSF.mask) <- c("green", "TSD", "TSFDI", "veg", "bio01", "bio12")
+
+
+```
+
+
+
+```{r}
+### Convert stack to data frame, retaining x y
+
+DAT.SEC.DSF.temp <- raster::as.data.frame(DSF.mask, xy = TRUE)
+
+
+### filter NA
+
+DAT.SEC.DSF.temp2 <- DAT.SEC.DSF.temp %>%
+    filter(!is.na(green)) %>%
+    filter(!is.na(TSD)) %>%
+    filter(!is.na(TSFDI)) %>%
+    filter(!is.na(bio01)) %>%
+    filter(!is.na(bio12))
+
+
+DAT.SEC.DSF.temp3 <- DAT.SEC.DSF.temp2
+
+
+
+### Randomly sample 10000 rows
+
+DAT.SEC.DSF <- as.data.frame(DAT.SEC.DSF.temp3[sample(nrow(DAT.SEC.DSF.temp3), 30000), ])
+
+
+### scale index
+
+DAT.SEC.DSF$green[DAT.SEC.DSF$green > 201] <- 201
+
+DAT.SEC.DSF$green <- (DAT.SEC.DSF$green*0.01)+(-1.01)
+
+
+### Repeat for WSF
+  
+DAT.SEC.WSF.temp <- raster::as.data.frame(WSF.mask, xy = TRUE)
+
+DAT.SEC.WSF.temp2 <- DAT.SEC.WSF.temp %>%
+    filter(!is.na(green)) %>%
+    filter(!is.na(TSD)) %>%
+    filter(!is.na(TSFDI)) %>%
+    filter(!is.na(bio01)) %>%
+    filter(!is.na(bio12))
+
+DAT.SEC.WSF.temp3 <- DAT.SEC.WSF.temp2
+
+
+DAT.SEC.WSF <- as.data.frame(DAT.SEC.WSF.temp3[sample(nrow(DAT.SEC.WSF.temp3), 30000), ])
+
+### scale index
+
+DAT.SEC.WSF$green[DAT.SEC.WSF$green > 201] <- 201
+
+DAT.SEC.WSF$green <- (DAT.SEC.WSF$green*0.01)+(-1.01)
+
+```
+
+## Create dataframe and factors
+
+```{r}
+
+DAT.SEC.DSF <- DAT.SEC.DSF %>%
+  dplyr::select(tsd = TSD,
+         green = green,
+         tsfdi = TSFDI,
+         mat = bio01,
+         mar = bio12,
+         x = x,
+         y = y)
+
+
+### recalculate TSD
+
+DAT.SEC.DSF$tsd <- 327 - DAT.SEC.DSF$tsd
+
+
+DAT.SEC.WSF <- DAT.SEC.WSF %>%
+  dplyr::select(tsd = TSD,
+         green = green,
+         tsfdi = TSFDI,
+         mat = bio01,
+         mar = bio12,
+         x = x,
+         y = y)
+
+
+### recalculate TSD
+
+DAT.SEC.WSF$tsd <- 327 - DAT.SEC.WSF$tsd
+
+### remove clutter from workspace
+
+rm(DAT.SEC.DSF.temp, DAT.SEC.DSF.temp2, DAT.SEC.DSF.temp3, DAT.SEC.WSF.temp, DAT.SEC.WSF.temp2, DAT.SEC.WSF.temp3, DSF.mask, WSF.mask)
+  
+```
+
+
+## Check for missing values
+
+```{r}
+colSums( is.na(DAT.SEC.DSF) )
+```
+
+
+```{r}
+colSums( is.na(DAT.SEC.WSF) )
+```
+
+
+
+
+```{r}
+### Subsample to points no closer than 300m distance
+
+library(spatialEco)
+library(sp)
+coordinates(DAT.SEC.DSF) <- ~x+y
+
+sub.DAT.SEC.DSF <- subsample.distance(DAT.SEC.DSF, size = 5000, d = 0.003, echo = FALSE)  
+
+DAT.SEC.DSF_300m <- as.data.frame(sub.DAT.SEC.DSF)
+
+save(DAT.SEC.DSF_300m, file = "DAT.SEC.DSF_300m.2.RData")
+
+#load("DAT.SEC.DSF_300m.RData")
+    
+```
+
+```{r}
+
+### Repeat for WSF
+
+coordinates(DAT.SEC.WSF) <- ~x+y
+
+sub.DAT.SEC.WSF <- subsample.distance(DAT.SEC.WSF, size = 5000, d = 0.003, echo = FALSE)  
+
+DAT.SEC.WSF_300m <- as.data.frame(sub.DAT.SEC.WSF)
+
+save(DAT.SEC.WSF_300m, file = "DAT.SEC.WSF_300m.2.RData")
+
+#load("DAT.SEC.WSF_300m.RData")
+
+```
+
+### each model takes over 30 mins to run
+
+### run model DSF
+
+```{r}
+### model 1
+
+DSF.model.SEC <- gam(green ~ te(x, y, k = 30) + s(tsd) + s(tsfdi) + s(mat) + s(mar), 
+          data = DAT.SEC.DSF_300m)
+
+save(DSF.model.SEC, file = "DSF.model.SEC.2.RData")
+
+```
+
+
+
+### run model WSF
+
+```{r}
+### model 1
+
+WSF.model.SEC <- gam(green ~ te(x, y, k = 30) + s(tsd) + s(tsfdi) + s(mat) + s(mar), 
+          data = DAT.SEC.WSF_300m)
+
+save(WSF.model.SEC, file = "WSF.model.SEC.2.RData")
+
+```
+

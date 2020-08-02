@@ -1,0 +1,1548 @@
+---
+title: "SECBIO_predictions"
+author: "E Bendall"
+date: "02/08/2020"
+output:
+  word_document: default
+  html_document: default
+---
+
+```{r setup, include=TRUE, message=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(here)
+library(dplyr)
+library(ggplot2)
+library(readxl)
+library(stringr)
+library(tidyr)
+library(stats)
+library(purrr)
+library(rstan)
+library(brms)
+library(mgcv)
+library(future)
+library(ggpubr)
+library(egg)
+
+#spatial library
+library(class)
+library(spdep)
+library(RANN)
+library(sf)
+library(sp)
+library(lwgeom)
+library(spatialEco)
+library(rgdal)
+
+
+#These options help Stan run faster:
+
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+
+# Make sure the scales package is available (it should be if ggplot is installed)
+requireNamespace("scales")
+
+# Default graph theme - white background
+theme_set( theme_bw() )
+
+set.seed(42)
+
+###### Some helper functions #####
+
+# Calculate standard page sizes
+pagesize <- function(size = c("A4", "A3", "A2", "A1", "A0"), 
+                     orientation = c("portrait", "landscape"),
+                     units = c("cm", "mm")) {
+  
+  size <- match.arg(size)
+  orientation <- match.arg(orientation)
+  units <- match.arg(units)
+  
+  alpha <- 1000 * 2^(1/4)
+  i <- as.integer(substr(size, 2, 2))
+  long <- alpha * 2^(-i/2)
+  
+  page <- switch(
+    orientation,
+    portrait = c(width = long / sqrt(2), height = long),
+    landscape = c(width = long, height = long / sqrt(2))
+  )
+  
+  page <- round(page)
+  if (units == "cm") page <- page / 10
+  
+  page <- c(as.list(page), units = units)
+  class(page) <- "pagesize"
+  
+  page
+}
+
+
+
+# Save a graph to a PDF file
+gg_pdf <- function(plot, filename, size = pagesize("A4", "landscape", "cm")) {
+  
+  if (!inherits(size, "pagesize")) stop("The size argument should be a pagesize (list) object")
+  
+  ggsave(
+    filename, 
+    plot, 
+    width = size$width,
+    height = size$height,
+    units = size$units)
+}
+
+
+# Calculate highest posterior density interval for a vector of values
+hpdi.vec <- function (x, prob = 0.95) {
+  n <- length(x)
+  if (n <= 1) stop("x must have more than 1 element")
+  x <- sort(x)
+
+  gap <- max(1, min(n - 1, round(n * prob)))
+  init <- 1:(n - gap)
+
+  inds <- which.min(x[init + gap] - x[init])
+
+  out <- c(lower = x[inds], upper = x[inds + gap])
+  out
+}
+
+
+```
+
+
+```{r}
+### Load models
+
+load("DSF.model.SEC.2.RData")
+
+load("WSF.model.SEC.2.RData")
+
+### Load data
+
+load("DAT.SEC.DSF_300m.2.RData")
+
+load("DAT.SEC.WSF_300m.2.RData")
+```
+
+
+```{r}
+
+### Create a set of prediction data over the range of variables
+
+### TSFDI
+
+f <- function(x, n = 83) seq(min(x), max(x), length.out = n)
+f2 <- function(x, n = 85) seq(min(x), max(x), length.out = n)
+
+
+pdat.DSF.tsfdi <- expand.grid(
+  tsfdi = f(DAT.SEC.DSF_300m$tsfdi))
+  
+pdat.DSF.tsfdi$tsd <- median(DAT.SEC.DSF_300m$tsd)
+pdat.DSF.tsfdi$mar <- median(DAT.SEC.DSF_300m$mar)
+pdat.DSF.tsfdi$mat <- median(DAT.SEC.DSF_300m$mat)  
+pdat.DSF.tsfdi$x <- median(DAT.SEC.DSF_300m$x)
+pdat.DSF.tsfdi$y <- median(DAT.SEC.DSF_300m$y)
+
+
+pdat.WSF.tsfdi <- expand.grid(
+  tsfdi = f2(DAT.SEC.WSF_300m$tsfdi))
+
+pdat.WSF.tsfdi$tsd <- median(DAT.SEC.WSF_300m$tsd)
+pdat.WSF.tsfdi$mar <- median(DAT.SEC.WSF_300m$mar)
+pdat.WSF.tsfdi$mat <- median(DAT.SEC.WSF_300m$mat)  
+pdat.WSF.tsfdi$x <- median(DAT.SEC.WSF_300m$x)
+pdat.WSF.tsfdi$y <- median(DAT.SEC.WSF_300m$y)
+
+
+
+### TSD
+
+f <- function(x, n = 30) seq(min(x), max(x), length.out = n)
+
+
+pdat.DSF.tsd <- expand.grid(
+  tsd = f(DAT.SEC.DSF_300m$tsd))
+  
+pdat.DSF.tsd$tsfdi <- median(DAT.SEC.DSF_300m$tsfdi)
+pdat.DSF.tsd$mar <- median(DAT.SEC.DSF_300m$mar)
+pdat.DSF.tsd$mat <- median(DAT.SEC.DSF_300m$mat)  
+pdat.DSF.tsd$x <- median(DAT.SEC.DSF_300m$x)
+pdat.DSF.tsd$y <- median(DAT.SEC.DSF_300m$y)
+
+
+pdat.WSF.tsd <- expand.grid(
+  tsd = f(DAT.SEC.WSF_300m$tsd))
+
+pdat.WSF.tsd$tsfdi <- median(DAT.SEC.WSF_300m$tsfdi)
+pdat.WSF.tsd$mar <- median(DAT.SEC.WSF_300m$mar)
+pdat.WSF.tsd$mat <- median(DAT.SEC.WSF_300m$mat)  
+pdat.WSF.tsd$x <- median(DAT.SEC.WSF_300m$x)
+pdat.WSF.tsd$y <- median(DAT.SEC.WSF_300m$y)
+
+### MAT
+
+f <- function(x, n = 24) seq(min(x), max(x), length.out = n)
+
+
+pdat.DSF.mat <- expand.grid(
+  mat = f(DAT.SEC.DSF_300m$mat))
+  
+pdat.DSF.mat$tsd <- median(DAT.SEC.DSF_300m$tsd)  
+pdat.DSF.mat$tsfdi <- median(DAT.SEC.DSF_300m$tsfdi)
+pdat.DSF.mat$mar <- median(DAT.SEC.DSF_300m$mar)  
+pdat.DSF.mat$x <- median(DAT.SEC.DSF_300m$x)
+pdat.DSF.mat$y <- median(DAT.SEC.DSF_300m$y)
+
+
+pdat.WSF.mat <- expand.grid(
+    mat = f(DAT.SEC.WSF_300m$mat))
+
+pdat.WSF.mat$tsd <- median(DAT.SEC.WSF_300m$tsd)
+pdat.WSF.mat$tsfdi <- median(DAT.SEC.WSF_300m$tsfdi)
+pdat.WSF.mat$mar <- median(DAT.SEC.WSF_300m$mar)  
+pdat.WSF.mat$x <- median(DAT.SEC.WSF_300m$x)
+pdat.WSF.mat$y <- median(DAT.SEC.WSF_300m$y)
+
+
+### MAR
+
+f <- function(x, n = 24) seq(min(x), max(x), length.out = n)
+
+
+pdat.DSF.mar <- expand.grid(
+  mar = f(DAT.SEC.DSF_300m$mar))
+  
+pdat.DSF.mar$tsd <- median(DAT.SEC.DSF_300m$tsd)  
+pdat.DSF.mar$tsfdi <- median(DAT.SEC.DSF_300m$tsfdi)
+pdat.DSF.mar$mat <- median(DAT.SEC.DSF_300m$mat)  
+pdat.DSF.mar$x <- median(DAT.SEC.DSF_300m$x)
+pdat.DSF.mar$y <- median(DAT.SEC.DSF_300m$y)
+
+
+pdat.WSF.mar <- expand.grid(
+    mar = f(DAT.SEC.WSF_300m$mar))
+
+pdat.WSF.mar$tsd <- median(DAT.SEC.WSF_300m$tsd)
+pdat.WSF.mar$tsfdi <- median(DAT.SEC.WSF_300m$tsfdi)
+pdat.WSF.mar$mat <- median(DAT.SEC.WSF_300m$mat)  
+pdat.WSF.mar$x <- median(DAT.SEC.WSF_300m$x)
+pdat.WSF.mar$y <- median(DAT.SEC.WSF_300m$y)
+```
+
+
+### Do posterior simulation
+
+```{r}
+
+### TSFDI
+
+### DSF
+
+Nsim <- 5000
+lp <- predict(DSF.model.SEC, newdata = pdat.DSF.tsfdi, type = "lpmatrix")
+coefs <- coef(DSF.model.SEC)
+vc <- vcov(DSF.model.SEC)
+sim <- rmvn(Nsim, mu = coefs, V = vc)
+
+ii <- grep("Intercept|tsd|tsfdi|mat|mar", colnames(lp))
+fits <- tcrossprod(lp[, ii], sim[, ii])
+colnames(fits) <- paste0("rep", 1:Nsim)
+
+pdat.DSF.tsfdi <- pdat.DSF.tsfdi %>% select(tsd, tsfdi, mat, mar)
+
+post.DSF.tsfdi <- cbind(pdat.DSF.tsfdi, fits) %>%
+  tidyr::gather(rep, value, -c(colnames(pdat.DSF.tsfdi)))
+
+
+### WSF
+
+Nsim <- 5000
+lp <- predict(WSF.model.SEC, newdata = pdat.WSF.tsfdi, type = "lpmatrix")
+coefs <- coef(WSF.model.SEC)
+vc <- vcov(WSF.model.SEC)
+sim <- rmvn(Nsim, mu = coefs, V = vc)
+
+ii <- grep("Intercept|tsd|tsfdi|mat|mar", colnames(lp))
+fits <- tcrossprod(lp[, ii], sim[, ii])
+colnames(fits) <- paste0("rep", 1:Nsim)
+
+pdat.WSF.tsfdi.a <- pdat.WSF.tsfdi %>% select(tsd, tsfdi, mat, mar)
+
+post.WSF.tsfdi.a <- cbind(pdat.WSF.tsfdi.a, fits) %>%
+  tidyr::gather(rep, value, -c(colnames(pdat.WSF.tsfdi.a)))
+
+Nsim <- 10000
+lp <- predict(WSF.model.SEC, newdata = pdat.WSF.tsfdi, type = "lpmatrix")
+coefs <- coef(WSF.model.SEC)
+vc <- vcov(WSF.model.SEC)
+sim <- rmvn(Nsim, mu = coefs, V = vc)
+
+ii <- grep("Intercept|tsd|tsfdi|mat|mar", colnames(lp))
+fits <- tcrossprod(lp[, ii], sim[, ii])
+colnames(fits) <- paste0("rep", 1:Nsim)
+
+pdat.WSF.tsfdi.b <- pdat.WSF.tsfdi %>% select(tsd, tsfdi, mat, mar)
+
+post.WSF.tsfdi.b <- cbind(pdat.WSF.tsfdi.b, fits) %>%
+  tidyr::gather(rep, value, -c(colnames(pdat.WSF.tsfdi.b)))
+
+post.WSF.tsfdi <- post.WSF.tsfdi.a
+
+
+```
+
+```{r}
+post.WSF.tsfdi.a.tst <- post.WSF.tsfdi.a %>%
+  mutate(tsfdi = factor(tsfdi))
+
+ggplot(data = post.WSF.tsfdi.a.tst , aes(x = value, col = tsfdi)) +
+  geom_density()
+```
+
+```{r}
+post.WSF.tsfdi.b.tst <- post.WSF.tsfdi.b %>%
+  mutate(tsfdi = factor(tsfdi))
+
+ggplot(data = post.WSF.tsfdi.b.tst , aes(x = value, col = tsfdi)) +
+  geom_density()
+```
+
+
+```{r}
+### TSD
+
+### DSF
+
+Nsim <- 5000
+lp <- predict(DSF.model.SEC, newdata = pdat.DSF.tsd, type = "lpmatrix")
+coefs <- coef(DSF.model.SEC)
+vc <- vcov(DSF.model.SEC)
+sim <- rmvn(Nsim, mu = coefs, V = vc)
+
+ii <- grep("Intercept|tsd|tsfdi|mat|mar", colnames(lp))
+fits <- tcrossprod(lp[, ii], sim[, ii])
+colnames(fits) <- paste0("rep", 1:Nsim)
+
+pdat.DSF.tsd <- pdat.DSF.tsd %>% select(tsd, tsfdi, mat, mar)
+
+post.DSF.tsd <- cbind(pdat.DSF.tsd, fits) %>%
+  tidyr::gather(rep, value, -c(colnames(pdat.DSF.tsd)))
+
+
+### WSF
+
+Nsim <- 5000
+lp <- predict(WSF.model.SEC, newdata = pdat.WSF.tsd, type = "lpmatrix")
+coefs <- coef(WSF.model.SEC)
+vc <- vcov(WSF.model.SEC)
+sim <- rmvn(Nsim, mu = coefs, V = vc)
+
+ii <- grep("Intercept|tsd|tsfdi|mat|mar", colnames(lp))
+fits <- tcrossprod(lp[, ii], sim[, ii])
+colnames(fits) <- paste0("rep", 1:Nsim)
+
+pdat.WSF.tsd <- pdat.WSF.tsd %>% select(tsd, tsfdi, mat, mar)
+
+post.WSF.tsd <- cbind(pdat.WSF.tsd, fits) %>%
+  tidyr::gather(rep, value, -c(colnames(pdat.WSF.tsd)))
+```
+
+```{r}
+### MAR
+
+### DSF
+
+Nsim <- 5000
+lp <- predict(DSF.model.SEC, newdata = pdat.DSF.mar, type = "lpmatrix")
+coefs <- coef(DSF.model.SEC)
+vc <- vcov(DSF.model.SEC)
+sim <- rmvn(Nsim, mu = coefs, V = vc)
+
+ii <- grep("Intercept|tsd|tsfdi|mat|mar", colnames(lp))
+fits <- tcrossprod(lp[, ii], sim[, ii])
+colnames(fits) <- paste0("rep", 1:Nsim)
+
+pdat.DSF.mar <- pdat.DSF.mar %>% select(tsd, tsfdi, mat, mar)
+
+post.DSF.mar <- cbind(pdat.DSF.mar, fits) %>%
+  tidyr::gather(rep, value, -c(colnames(pdat.DSF.mar)))
+
+
+### WSF
+
+Nsim <- 5000
+lp <- predict(WSF.model.SEC, newdata = pdat.WSF.mar, type = "lpmatrix")
+coefs <- coef(WSF.model.SEC)
+vc <- vcov(WSF.model.SEC)
+sim <- rmvn(Nsim, mu = coefs, V = vc)
+
+ii <- grep("Intercept|tsd|tsfdi|mat|mar", colnames(lp))
+fits <- tcrossprod(lp[, ii], sim[, ii])
+colnames(fits) <- paste0("rep", 1:Nsim)
+
+pdat.WSF.mar <- pdat.WSF.mar %>% select(tsd, tsfdi, mat, mar)
+
+post.WSF.mar <- cbind(pdat.WSF.mar, fits) %>%
+  tidyr::gather(rep, value, -c(colnames(pdat.WSF.mar)))
+```
+
+```{r}
+### MAT
+
+### DSF
+
+Nsim <- 5000
+lp <- predict(DSF.model.SEC, newdata = pdat.DSF.mat, type = "lpmatrix")
+coefs <- coef(DSF.model.SEC)
+vc <- vcov(DSF.model.SEC)
+sim <- rmvn(Nsim, mu = coefs, V = vc)
+
+ii <- grep("Intercept|tsd|tsfdi|mat|mar", colnames(lp))
+fits <- tcrossprod(lp[, ii], sim[, ii])
+colnames(fits) <- paste0("rep", 1:Nsim)
+
+pdat.DSF.mat <- pdat.DSF.mat %>% select(tsd, tsfdi, mat, mar)
+
+post.DSF.mat <- cbind(pdat.DSF.mat, fits) %>%
+  tidyr::gather(rep, value, -c(colnames(pdat.DSF.mat)))
+
+
+### WSF
+
+Nsim <- 5000
+lp <- predict(WSF.model.SEC, newdata = pdat.WSF.mat, type = "lpmatrix")
+coefs <- coef(WSF.model.SEC)
+vc <- vcov(WSF.model.SEC)
+sim <- rmvn(Nsim, mu = coefs, V = vc)
+
+ii <- grep("Intercept|tsd|tsfdi|mat|mar", colnames(lp))
+fits <- tcrossprod(lp[, ii], sim[, ii])
+colnames(fits) <- paste0("rep", 1:Nsim)
+
+pdat.WSF.mat <- pdat.WSF.mat %>% select(tsd, tsfdi, mat, mar)
+
+post.WSF.mat <- cbind(pdat.WSF.mat, fits) %>%
+  tidyr::gather(rep, value, -c(colnames(pdat.WSF.mat)))
+```
+
+
+
+```{r}
+### summarize data for plotting
+
+### TSFDI
+
+## DSF 
+x.stats.DSF.tsfdi <- post.DSF.tsfdi %>%
+  group_by(mar, mat, tsd, tsfdi) %>%
+    summarize(mid = median(value),
+                  lwr95 = hpdi.vec(value, 0.95)[1],
+                  upr95 = hpdi.vec(value, 0.95)[2],
+                  lwr50 = hpdi.vec(value, 0.50)[1],
+                  upr50 = hpdi.vec(value, 0.50)[2])
+
+## WSF
+x.stats.WSF.tsfdi <- post.WSF.tsfdi.a %>%
+  group_by(mar, mat, tsd, tsfdi) %>%
+    summarize(mid = median(value),
+                  lwr95 = hpdi.vec(value, 0.95)[1],
+                  upr95 = hpdi.vec(value, 0.95)[2],
+                  lwr50 = hpdi.vec(value, 0.50)[1],
+                  upr50 = hpdi.vec(value, 0.50)[2])
+
+
+
+### TSD
+
+## DSF 
+x.stats.DSF.tsd <- post.DSF.tsd %>%
+  group_by(mar, mat, tsd, tsfdi) %>%
+    summarize(mid = median(value),
+                  lwr95 = hpdi.vec(value, 0.95)[1],
+                  upr95 = hpdi.vec(value, 0.95)[2],
+                  lwr50 = hpdi.vec(value, 0.50)[1],
+                  upr50 = hpdi.vec(value, 0.50)[2])
+
+## WSF
+x.stats.WSF.tsd <- post.WSF.tsd %>%
+  group_by(mar, mat, tsd, tsfdi) %>%
+    summarize(mid = median(value),
+                  lwr95 = hpdi.vec(value, 0.95)[1],
+                  upr95 = hpdi.vec(value, 0.95)[2],
+                  lwr50 = hpdi.vec(value, 0.50)[1],
+                  upr50 = hpdi.vec(value, 0.50)[2])
+
+### MAR
+
+## DSF 
+x.stats.DSF.mar <- post.DSF.mar %>%
+  group_by(mar, mat, tsd, tsfdi) %>%
+    summarize(mid = median(value),
+                  lwr95 = hpdi.vec(value, 0.95)[1],
+                  upr95 = hpdi.vec(value, 0.95)[2],
+                  lwr50 = hpdi.vec(value, 0.50)[1],
+                  upr50 = hpdi.vec(value, 0.50)[2])
+
+## WSF
+x.stats.WSF.mar <- post.WSF.mar %>%
+  group_by(mar, mat, tsd, tsfdi) %>%
+    summarize(mid = median(value),
+                  lwr95 = hpdi.vec(value, 0.95)[1],
+                  upr95 = hpdi.vec(value, 0.95)[2],
+                  lwr50 = hpdi.vec(value, 0.50)[1],
+                  upr50 = hpdi.vec(value, 0.50)[2])
+
+### MAT
+
+## DSF 
+x.stats.DSF.mat <- post.DSF.mat %>%
+  group_by(mar, mat, tsd, tsfdi) %>%
+    summarize(mid = median(value),
+                  lwr95 = hpdi.vec(value, 0.95)[1],
+                  upr95 = hpdi.vec(value, 0.95)[2],
+                  lwr50 = hpdi.vec(value, 0.50)[1],
+                  upr50 = hpdi.vec(value, 0.50)[2])
+
+## WSF
+x.stats.WSF.mat <- post.WSF.mat %>%
+  group_by(mar, mat, tsd, tsfdi) %>%
+    summarize(mid = median(value),
+                  lwr95 = hpdi.vec(value, 0.95)[1],
+                  upr95 = hpdi.vec(value, 0.95)[2],
+                  lwr50 = hpdi.vec(value, 0.50)[1],
+                  upr50 = hpdi.vec(value, 0.50)[2])
+
+```
+
+
+```{r fig.height = 4, fig.width = 5}
+
+xtext <- c("no scar", "scar", "no scar", "scar", "no scar", "scar", "no scar", "scar")
+ytext <- c("Pole-sized")
+lines <- c("solid", "dashed", "dotted", "longdash")
+My_Theme = theme(
+  plot.title = element_text(size = 12, face = "bold", hjust = 0.5),
+  axis.title.y = element_text(size = 12, face = "bold"),
+  axis.text.y = element_text(size = 10, margin = unit(c(0.1, 0.1, 0.1, -0.2), "cm")),
+  axis.text.x = element_text(size = 11, vjust = 0, margin = unit(c(0.15, 0.1, 0.1, 0.1), "cm")),
+  axis.title.x = element_text(size = 11, face = "bold", vjust = -0.5),
+  strip.text.x = element_text(size = 11),
+  strip.text.y = element_text(size = 11),
+  strip.text = element_text(size = 11),
+  strip.background = element_blank(),
+  panel.background = element_blank(),
+  strip.placement = "inside",
+  axis.ticks.length = unit(-0.07, "cm"),
+  axis.ticks = element_line(size = 0.8),
+  panel.grid.minor.x = element_blank(),
+  panel.grid.major.x = element_blank(),
+  panel.grid.minor.y = element_blank(),
+  panel.grid.major.y = element_blank(),
+  legend.position = c(0.150, 0.70),
+  legend.title = element_text(size = 9, hjust = 0.6, face = "bold"),
+  legend.text = element_text(size = 9),
+  legend.key.width = unit(0.3, "cm"),
+  legend.key.height = unit(0.5, "cm"),
+  legend.background = element_blank(),
+  plot.margin = unit(c(2, 2, 2, 2), "pt"))
+
+
+
+DSF.plot.tsfdi.SEC <- ggplot(x.stats.DSF.tsfdi, aes(x = tsfdi)) +
+  
+   My_Theme +
+  
+  geom_ribbon(aes(ymin = lwr95, ymax = upr95), fill = "grey70", alpha = 0.7) +
+  
+  geom_point(data = DAT.SEC.DSF_300m, aes(y = green), col = "orchid4", size = 0.05, alpha = 0.3) +
+  
+  geom_ribbon(aes(ymin = lwr50, ymax = upr50), fill = "navyblue", alpha = 0.7) +
+  
+  geom_hline(yintercept = 0, linetype = "solid", size = 0.4, colour = "grey25") +
+  
+  geom_vline(xintercept = 0, linetype = "solid", size = 0.4, col = "grey25") +
+ 
+  labs(y = "", x = expression(bold('TSF'[i]))) +
+  
+  coord_cartesian(xlim=c(-17, 26), ylim=c(-1, 1)) 
+  
+ggsave("DSF.plot.tsfdi.SEC.png")
+
+DSF.plot.tsfdi.SEC
+```
+
+```{r fig.height = 4, fig.width = 5}
+
+xtext <- c("no scar", "scar", "no scar", "scar", "no scar", "scar", "no scar", "scar")
+ytext <- c("Pole-sized")
+lines <- c("solid", "dashed", "dotted", "longdash")
+My_Theme = theme(
+  plot.title = element_text(size = 12, face = "bold", hjust = 0.5),
+  axis.title.y = element_text(size = 12, face = "bold"),
+  axis.text.y = element_blank(),
+  axis.text.x = element_text(size = 11, vjust = 0, margin = unit(c(0.15, 0.1, 0.1, 0.1), "cm")),
+  axis.title.x = element_text(size = 11, face = "bold", vjust = -0.5),
+  strip.text.x = element_text(size = 11),
+  strip.text.y = element_text(size = 11),
+  strip.text = element_text(size = 11),
+  strip.background = element_blank(),
+  panel.background = element_blank(),
+  strip.placement = "inside",
+  axis.ticks.length = unit(-0.07, "cm"),
+  axis.ticks = element_line(size = 0.8),
+  panel.grid.minor.x = element_blank(),
+  panel.grid.major.x = element_blank(),
+  panel.grid.minor.y = element_blank(),
+  panel.grid.major.y = element_blank(),
+  legend.position = c(0.150, 0.70),
+  legend.title = element_text(size = 9, hjust = 0.6, face = "bold"),
+  legend.text = element_text(size = 9),
+  legend.key.width = unit(0.3, "cm"),
+  legend.key.height = unit(0.5, "cm"),
+  legend.background = element_blank(),
+  plot.margin = unit(c(2, 2, 2, 2), "pt"))
+
+
+DSF.plot.tsd.SEC <- ggplot(x.stats.DSF.tsd, aes(x = tsd)) +
+  
+   My_Theme +
+  
+   geom_ribbon(aes(ymin = lwr95, ymax = upr95), fill = "grey70", alpha = 0.7) +
+  
+  geom_point(data = DAT.SEC.DSF_300m, aes(y = green), col = "orchid4", size = 0.05, alpha = 0.3) +
+  
+  geom_ribbon(aes(ymin = lwr50, ymax = upr50), fill = "navyblue", alpha = 0.7) +
+  
+  labs(y = "", x = "Time since drought (months)") +
+  
+  coord_cartesian(xlim=c(0, 150), ylim=c(-1, 1)) +
+  
+  geom_hline(yintercept = 0, linetype = "solid", size = 0.4, colour = "grey25") +
+  
+ggsave("DSF.plot.tsd.SEC.png")
+
+DSF.plot.tsd.SEC
+```
+
+```{r fig.height = 4, fig.width = 5}
+
+
+xtext <- c("no scar", "scar", "no scar", "scar", "no scar", "scar", "no scar", "scar")
+ytext <- c("Pole-sized")
+lines <- c("solid", "dashed", "dotted", "longdash")
+My_Theme = theme(
+  plot.title = element_text(size = 12, face = "bold", hjust = 0.5),
+  axis.title.y = element_text(size = 12, face = "bold"),
+  axis.text.y = element_text(size = 10, margin = unit(c(0.1, 0.1, 0.1, -0.2), "cm")),
+  axis.text.x = element_text(size = 11, vjust = 0, margin = unit(c(0.15, 0.1, 0.1, 0.1), "cm")),
+  axis.title.x = element_text(size = 11, face = "bold", vjust = -0.5),
+  strip.text.x = element_text(size = 11),
+  strip.text.y = element_text(size = 11),
+  strip.text = element_text(size = 11),
+  strip.background = element_blank(),
+  panel.background = element_blank(),
+  strip.placement = "inside",
+  axis.ticks.length = unit(-0.07, "cm"),
+  axis.ticks = element_line(size = 0.8),
+  panel.grid.minor.x = element_blank(),
+  panel.grid.major.x = element_blank(),
+  panel.grid.minor.y = element_blank(),
+  panel.grid.major.y = element_blank(),
+  legend.position = c(0.150, 0.70),
+  legend.title = element_text(size = 9, hjust = 0.6, face = "bold"),
+  legend.text = element_text(size = 9),
+  legend.key.width = unit(0.3, "cm"),
+  legend.key.height = unit(0.5, "cm"),
+  legend.background = element_blank(),
+  plot.margin = unit(c(2, 2, 2, 2), "pt"))
+
+
+
+DSF.plot.mar.SEC <- ggplot(x.stats.DSF.mar, aes(x = mar)) +
+  
+   My_Theme +
+  
+  
+  geom_ribbon(aes(ymin = lwr95, ymax = upr95), fill = "grey70", alpha = 0.7) +
+  
+  geom_point(data = DAT.SEC.DSF_300m, aes(y = green), col = "orchid4", size = 0.05, alpha = 0.3) +
+  
+  geom_ribbon(aes(ymin = lwr50, ymax = upr50), fill = "navyblue", alpha = 0.7) +
+ 
+  labs(y = "", x = "Mean annual rainfall (mm)", title = "") +
+  
+  coord_cartesian(xlim=c(700, 1300), ylim=c(-1, 1)) +
+  
+  geom_hline(yintercept = 0, linetype = "solid", size = 0.4, colour = "grey25") +
+
+  
+ggsave("DSF.plot.mar.SEC.png")
+
+DSF.plot.mar.SEC
+```
+
+```{r fig.height = 4, fig.width = 5}
+
+xtext <- c("no scar", "scar", "no scar", "scar", "no scar", "scar", "no scar", "scar")
+ytext <- c("Pole-sized")
+lines <- c("solid", "dashed", "dotted", "longdash")
+My_Theme = theme(
+  plot.title = element_text(size = 12, face = "bold", hjust = 0.5),
+  axis.title.y = element_text(size = 12, face = "bold"),
+  axis.text.y = element_blank(),
+  axis.text.x = element_text(size = 11, vjust = 0, margin = unit(c(0.15, 0.1, 0.1, 0.1), "cm")),
+  axis.title.x = element_text(size = 11, face = "bold", vjust = -0.5),
+  strip.text.x = element_text(size = 11),
+  strip.text.y = element_text(size = 11),
+  strip.text = element_text(size = 11),
+  strip.background = element_blank(),
+  panel.background = element_blank(),
+  strip.placement = "inside",
+  axis.ticks.length = unit(-0.07, "cm"),
+  axis.ticks = element_line(size = 0.8),
+  panel.grid.minor.x = element_blank(),
+  panel.grid.major.x = element_blank(),
+  panel.grid.minor.y = element_blank(),
+  panel.grid.major.y = element_blank(),
+  legend.position = c(0.150, 0.70),
+  legend.title = element_text(size = 9, hjust = 0.6, face = "bold"),
+  legend.text = element_text(size = 9),
+  legend.key.width = unit(0.3, "cm"),
+  legend.key.height = unit(0.5, "cm"),
+  legend.background = element_blank(),
+  plot.margin = unit(c(2, 2, 2, 2), "pt"))
+
+
+
+DSF.plot.mat.SEC <- ggplot(x.stats.DSF.mat, aes(x = mat)) +
+  
+   My_Theme +
+  
+  geom_ribbon(aes(ymin = lwr95, ymax = upr95), fill = "grey70", alpha = 0.7) +
+  
+  geom_point(data = DAT.SEC.DSF_300m, aes(y = green), col = "orchid4", size = 0.05, alpha = 0.3) +
+  
+  geom_ribbon(aes(ymin = lwr50, ymax = upr50), fill = "navyblue", alpha = 0.7) +
+
+  labs(y = "", x = "Mean annual temperature (°C)", title = "") +
+  
+  coord_cartesian(xlim=c(9, 15), ylim=c(-1, 1)) +
+  
+  geom_hline(yintercept = 0, linetype = "solid", size = 0.4, colour = "grey25") +
+ 
+ggsave("DSF.plot.mat.SEC.png")
+
+DSF.plot.mat.SEC
+```
+
+### DSF combined plot
+
+
+```{r fig.height = 4, fig.width = 7}
+
+combined_greening_plot_DSF_main <- egg::ggarrange(DSF.plot.tsfdi.SEC, DSF.plot.tsd.SEC, ncol = 2, nrow = 1) 
+
+combined_greening_plot_DSF_main <- annotate_figure(combined_greening_plot_DSF_main, bottom = text_grob(""), left = text_grob(bquote(bold('PG'[i])), face = "bold", rot = 90, vjust = 0.5, hjust = -0.5, size = 12))
+  
+
+ggsave("SEC_combined_greening_plot_DSF_main.png")
+
+combined_greening_plot_DSF_main
+```
+
+### DSF plot appendix
+
+```{r fig.height = 4, fig.width = 7}
+
+combined_greening_plot_DSF_sub <- egg::ggarrange(DSF.plot.mar.SEC, DSF.plot.mat.SEC, ncol = 2, nrow = 1) 
+
+combined_greening_plot_DSF_sub <- annotate_figure(combined_greening_plot_DSF_sub, bottom = text_grob(""), left = text_grob(bquote(bold('PG'[i])), face = "bold", rot = 90, vjust = 0.5, hjust = -0.5, size = 12))
+  
+
+ggsave("SEC_combined_greening_plot_DSF_sub.png")
+
+combined_greening_plot_DSF_sub
+```
+
+
+### WSF plots
+
+```{r fig.height = 4, fig.width = 5}
+
+xtext <- c("no scar", "scar", "no scar", "scar", "no scar", "scar", "no scar", "scar")
+ytext <- c("Pole-sized")
+lines <- c("solid", "dashed", "dotted", "longdash")
+My_Theme = theme(
+  plot.title = element_text(size = 12, face = "bold", hjust = 0.5),
+  axis.title.y = element_text(size = 12, face = "bold"),
+  axis.text.y = element_text(size = 10, margin = unit(c(0.1, 0.1, 0.1, -0.2), "cm")),
+  axis.text.x = element_text(size = 11, vjust = 0, margin = unit(c(0.15, 0.1, 0.1, 0.1), "cm")),
+  axis.title.x = element_text(size = 11, face = "bold", vjust = -0.5),
+  strip.text.x = element_text(size = 11),
+  strip.text.y = element_text(size = 11),
+  strip.text = element_text(size = 11),
+  strip.background = element_blank(),
+  panel.background = element_blank(),
+  strip.placement = "inside",
+  axis.ticks.length = unit(-0.07, "cm"),
+  axis.ticks = element_line(size = 0.8),
+  panel.grid.minor.x = element_blank(),
+  panel.grid.major.x = element_blank(),
+  panel.grid.minor.y = element_blank(),
+  panel.grid.major.y = element_blank(),
+  legend.position = c(0.150, 0.70),
+  legend.title = element_text(size = 9, hjust = 0.6, face = "bold"),
+  legend.text = element_text(size = 9),
+  legend.key.width = unit(0.3, "cm"),
+  legend.key.height = unit(0.5, "cm"),
+  legend.background = element_blank(),
+  plot.margin = unit(c(2, 2, 2, 2), "pt"))
+
+
+
+WSF.plot.tsfdi.SEC <- ggplot(x.stats.WSF.tsfdi, aes(x = tsfdi)) +
+  
+   My_Theme +
+  
+  geom_ribbon(aes(ymin = lwr95, ymax = upr95), fill = "grey70", alpha = 0.7) +
+  
+  geom_point(data = DAT.SEC.WSF_300m, aes(y = green), col = "orchid4", size = 0.05, alpha = 0.3) +
+  
+  geom_ribbon(aes(ymin = lwr50, ymax = upr50), fill = "navyblue", alpha = 0.7) +
+ 
+ labs(y = "", x = expression(bold('TSF'[i]))) +
+  
+  coord_cartesian(ylim=c(-1, 1)) +
+  
+  geom_hline(yintercept = 0, linetype = "solid", size = 0.4, colour = "grey25") +
+ 
+  geom_vline(xintercept = 0, linetype = "solid", size = 0.4, colour = "grey25") +
+ 
+  
+ggsave("WSF.plot.tsfdi.SEC.png")
+
+WSF.plot.tsfdi.SEC
+```
+
+```{r fig.height = 4, fig.width = 5}
+
+xtext <- c("no scar", "scar", "no scar", "scar", "no scar", "scar", "no scar", "scar")
+ytext <- c("Pole-sized")
+lines <- c("solid", "dashed", "dotted", "longdash")
+My_Theme = theme(
+  plot.title = element_text(size = 12, face = "bold", hjust = 0.5),
+  axis.title.y = element_text(size = 12, face = "bold"),
+  axis.text.y = element_blank(),
+  axis.text.x = element_text(size = 11, vjust = 0, margin = unit(c(0.15, 0.1, 0.1, 0.1), "cm")),
+  axis.title.x = element_text(size = 11, face = "bold", vjust = -0.5),
+  strip.text.x = element_text(size = 11),
+  strip.text.y = element_text(size = 11),
+  strip.text = element_text(size = 11),
+  strip.background = element_blank(),
+  panel.background = element_blank(),
+  strip.placement = "inside",
+  axis.ticks.length = unit(-0.07, "cm"),
+  axis.ticks = element_line(size = 0.8),
+  panel.grid.minor.x = element_blank(),
+  panel.grid.major.x = element_blank(),
+  panel.grid.minor.y = element_blank(),
+  panel.grid.major.y = element_blank(),
+  legend.position = c(0.150, 0.70),
+  legend.title = element_text(size = 9, hjust = 0.6, face = "bold"),
+  legend.text = element_text(size = 9),
+  legend.key.width = unit(0.3, "cm"),
+  legend.key.height = unit(0.5, "cm"),
+  legend.background = element_blank(),
+  plot.margin = unit(c(2, 2, 2, 2), "pt"))
+
+
+
+WSF.plot.tsd.SEC <- ggplot(x.stats.WSF.tsd, aes(x = tsd)) +
+  
+   My_Theme +
+  
+ geom_ribbon(aes(ymin = lwr95, ymax = upr95), fill = "grey70", alpha = 0.7) +
+  
+  geom_point(data = DAT.SEC.WSF_300m, aes(y = green), col = "orchid4", size = 0.05, alpha = 0.3) +
+  
+  geom_ribbon(aes(ymin = lwr50, ymax = upr50), fill = "navyblue", alpha = 0.7) +
+ 
+  labs(y = "", x = "Time since drought (months)") +
+  
+  coord_cartesian(xlim=c(0, 150), ylim=c(-1, 1)) +
+  
+  geom_hline(yintercept = 0, linetype = "solid", size = 0.4, colour = "grey25") +
+  
+ggsave("WSF.plot.tsd.SEC.png")
+
+WSF.plot.tsd.SEC
+```
+
+```{r fig.height = 4, fig.width = 5}
+
+xtext <- c("no scar", "scar", "no scar", "scar", "no scar", "scar", "no scar", "scar")
+ytext <- c("Pole-sized")
+lines <- c("solid", "dashed", "dotted", "longdash")
+My_Theme = theme(
+  plot.title = element_text(size = 12, face = "bold", hjust = 0.5),
+  axis.title.y = element_text(size = 12, face = "bold"),
+  axis.text.y = element_text(size = 10, margin = unit(c(0.1, 0.1, 0.1, -0.2), "cm")),
+  axis.text.x = element_text(size = 11, vjust = 0, margin = unit(c(0.15, 0.1, 0.1, 0.1), "cm")),
+  axis.title.x = element_text(size = 11, face = "bold", vjust = -0.5),
+  strip.text.x = element_text(size = 11),
+  strip.text.y = element_text(size = 11),
+  strip.text = element_text(size = 11),
+  strip.background = element_blank(),
+  panel.background = element_blank(),
+  strip.placement = "inside",
+  axis.ticks.length = unit(-0.07, "cm"),
+  axis.ticks = element_line(size = 0.8),
+  panel.grid.minor.x = element_blank(),
+  panel.grid.major.x = element_blank(),
+  panel.grid.minor.y = element_blank(),
+  panel.grid.major.y = element_blank(),
+  legend.position = c(0.150, 0.70),
+  legend.title = element_text(size = 9, hjust = 0.6, face = "bold"),
+  legend.text = element_text(size = 9),
+  legend.key.width = unit(0.3, "cm"),
+  legend.key.height = unit(0.5, "cm"),
+  legend.background = element_blank(),
+  plot.margin = unit(c(2, 2, 2, 2), "pt"))
+
+
+
+WSF.plot.mar.SEC <- ggplot(x.stats.WSF.mar, aes(x = mar)) +
+  
+   My_Theme +
+  
+ geom_ribbon(aes(ymin = lwr95, ymax = upr95), fill = "grey70", alpha = 0.7) +
+  
+  geom_point(data = DAT.SEC.WSF_300m, aes(y = green), col = "orchid4", size = 0.05, alpha = 0.3) +
+  
+  geom_ribbon(aes(ymin = lwr50, ymax = upr50), fill = "navyblue", alpha = 0.7) +
+  
+ 
+  labs(y = "", x = "Mean annual rainfall (mm)", title = "") +
+  
+  coord_cartesian(xlim=c(800, 1300), ylim=c(-1, 1)) +
+  
+  
+  geom_hline(yintercept = 0, linetype = "solid", size = 0.4, colour = "grey25") +
+ 
+ggsave("WSF.plot.mar.SEC.png")
+
+WSF.plot.mar.SEC
+```
+
+```{r fig.height = 4, fig.width = 5}
+
+
+xtext <- c("no scar", "scar", "no scar", "scar", "no scar", "scar", "no scar", "scar")
+ytext <- c("Pole-sized")
+lines <- c("solid", "dashed", "dotted", "longdash")
+My_Theme = theme(
+  plot.title = element_text(size = 12, face = "bold", hjust = 0.5),
+  axis.title.y = element_text(size = 11, face = "bold"),
+  axis.text.y = element_blank(),
+  axis.text.x = element_text(size = 11, vjust = 0, margin = unit(c(0.15, 0.1, 0.1, 0.1), "cm")),
+  axis.title.x = element_text(size = 11, face = "bold", vjust = -0.5),
+  strip.text.x = element_text(size = 11),
+  strip.text.y = element_text(size = 11),
+  strip.text = element_text(size = 11),
+  strip.background = element_blank(),
+  panel.background = element_blank(),
+  strip.placement = "inside",
+  axis.ticks.length = unit(-0.07, "cm"),
+  axis.ticks = element_line(size = 0.8),
+  panel.grid.minor.x = element_blank(),
+  panel.grid.major.x = element_blank(),
+  panel.grid.minor.y = element_blank(),
+  panel.grid.major.y = element_blank(),
+  legend.position = c(0.150, 0.70),
+  legend.title = element_text(size = 9, hjust = 0.6, face = "bold"),
+  legend.text = element_text(size = 9),
+  legend.key.width = unit(0.3, "cm"),
+  legend.key.height = unit(0.5, "cm"),
+  legend.background = element_blank(),
+  plot.margin = unit(c(2, 2, 2, 2), "pt"))
+
+
+
+WSF.plot.mat.SEC <- ggplot(x.stats.WSF.mat, aes(x = mat)) +
+  
+   My_Theme +
+  
+ geom_ribbon(aes(ymin = lwr95, ymax = upr95), fill = "grey70", alpha = 0.7) +
+  
+  geom_point(data = DAT.SEC.WSF_300m, aes(y = green), col = "orchid4", size = 0.05, alpha = 0.3) +
+  
+  geom_ribbon(aes(ymin = lwr50, ymax = upr50), fill = "navyblue", alpha = 0.7) +
+ 
+  labs(y = "", x = "Mean annual temperature (°C)", title = "") +
+  
+  coord_cartesian(xlim=c(9, 16), ylim=c(-1, 1)) +
+  
+  geom_hline(yintercept = 0, linetype = "solid", size = 0.4, colour = "grey25") +
+ 
+  
+ggsave("WSF.plot.mat.SEC.png")
+
+WSF.plot.mat.SEC
+```
+
+### Combined WSF plot
+
+```{r fig.height = 4, fig.width = 7}
+
+combined_greening_plot_WSF_main <- egg::ggarrange(WSF.plot.tsfdi.SEC, WSF.plot.tsd.SEC, ncol = 2, nrow = 1) 
+
+combined_greening_plot_WSF_main <- annotate_figure(combined_greening_plot_WSF_main, bottom = text_grob(""), left = text_grob(bquote(bold('PG'[i])), face = "bold", rot = 90, vjust = 0.5, hjust = -0.5, size = 12))
+  
+
+ggsave("SEC_combined_greening_plot_WSF_main.png")
+
+combined_greening_plot_WSF_main
+```
+
+### WSF plot appendix
+
+```{r fig.height = 4, fig.width = 7}
+
+combined_greening_plot_WSF_sub <- egg::ggarrange(WSF.plot.mar.SEC, WSF.plot.mat.SEC, ncol = 2, nrow = 1) 
+
+combined_greening_plot_WSF_sub <- annotate_figure(combined_greening_plot_WSF_sub, bottom = text_grob(""), left = text_grob(bquote(bold('PG'[i])), face = "bold", rot = 90, vjust = 0.5, hjust = -0.5, size = 12))
+  
+
+ggsave("SEC_combined_greening_plot_WSF_sub.png")
+
+combined_greening_plot_WSF_sub
+```
+
+### DSF medians
+
+```{r}
+
+### predicted medians
+
+DSF.med.tsfdi <- post.DSF.tsfdi %>%
+  filter(tsfdi == "-17" | tsfdi == "-15" | tsfdi == "-12.2" | tsfdi == "-10" | tsfdi == "-7.5" | tsfdi == "-5" | tsfdi == "-2.5" | tsfdi == "0" | tsfdi == "2.5" | tsfdi == "5" | tsfdi == "7.5" | tsfdi == "10" | tsfdi == "12.5" | tsfdi == "15" | tsfdi == "17.5" | tsfdi == "20" | tsfdi == "22.5" | tsfdi == "24") %>%
+  group_by(tsfdi) %>%
+  
+      summarize(lwr95 = hpdi.vec(value, 0.95)[1],
+                  lwr50 = hpdi.vec(value, 0.50)[1],
+                  mid = median(value),
+                  upr50 = hpdi.vec(value, 0.50)[2],
+                  upr95 = hpdi.vec(value, 0.95)[2])
+
+DSF.med.tsd <- post.DSF.tsd %>%
+  mutate(tsd = case_when(between(tsd, 0, 6) ~ 6,
+                         between(tsd, 7, 12) ~ 12,
+                         between(tsd, 13, 24) ~ 24,
+                         between(tsd, 25, 60) ~ 60,
+                         between(tsd, 61, 120) ~ 120,
+                         between(tsd, 121, 150) ~ 150)) %>%
+  
+  group_by(tsd) %>%
+  
+      summarize(lwr95 = hpdi.vec(value, 0.95)[1],
+                  lwr50 = hpdi.vec(value, 0.50)[1],
+                  mid = median(value),
+                  upr50 = hpdi.vec(value, 0.50)[2],
+                  upr95 = hpdi.vec(value, 0.95)[2])
+
+DSF.med.mar <- post.DSF.mar %>%
+    mutate(mar = case_when(between(mar, 600, 700) ~ 700,
+                         between(mar, 701, 800) ~ 800,
+                         between(mar, 900, 1000) ~ 1000,
+                         between(mar, 1100, 1200) ~ 1200,
+                         between(mar, 1201, 1400) ~ 1400)) %>%
+  
+  group_by(mar) %>%
+  
+      summarize(lwr95 = hpdi.vec(value, 0.95)[1],
+                  lwr50 = hpdi.vec(value, 0.50)[1],
+                  mid = median(value),
+                  upr50 = hpdi.vec(value, 0.50)[2],
+                  upr95 = hpdi.vec(value, 0.95)[2])
+
+
+DSF.med.mat <- post.DSF.mat %>%
+      mutate(mat = case_when(between(mat, 11, 12) ~ 12,
+                         between(mat, 13, 14) ~ 14,
+                         between(mat, 15, 16) ~ 16,
+                         between(mat, 17, 18) ~ 18)) %>%
+
+  group_by(mat) %>%
+
+      summarize(lwr95 = hpdi.vec(value, 0.95)[1],
+                  lwr50 = hpdi.vec(value, 0.50)[1],
+                  mid = median(value),
+                  upr50 = hpdi.vec(value, 0.50)[2],
+                  upr95 = hpdi.vec(value, 0.95)[2])
+
+### combine data frames
+
+DSF.meds.summary <- list(DSF.med.tsfdi, DSF.med.tsd, DSF.med.mar, DSF.med.mat)
+
+knitr::kable(DSF.meds.summary, digits = 3)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+unused but potentially useful analyses below
+
+
+```{r}#
+### what proportion of the posterior samples are < 0 at different values of TSFDI ?
+
+### create 'state' variable ### NOTE: this needs to be more detailed - need a buffer around zero (e.g. -5, 5) with a third category 'no change'
+
+DSF.temp.tsfdi <- post.DSF.tsfdi %>%
+  select(tsfdi, value) %>%
+  group_by(tsfdi) %>%
+    
+  mutate(state = ifelse(value < 0, "browning", "greening")) %>%
+
+ungroup() 
+
+DSF.temp.tsd <- post.DSF.tsd %>%
+  select(tsd, value) %>%
+  group_by(tsd) %>%
+    
+  mutate(state = ifelse(value < 0, "browning", "greening")) %>%
+
+ungroup() 
+
+DSF.temp.mar <- post.DSF.mar %>%
+  select(mar, value) %>%
+  group_by(mar) %>%
+    
+  mutate(state = ifelse(value < 0, "browning", "greening")) %>%
+
+ungroup() 
+
+DSF.temp.mat <- post.DSF.mat %>%
+  select(mat, value) %>%
+  group_by(mat) %>%
+    
+  mutate(state = ifelse(value < 0, "browning", "greening")) %>%
+
+ungroup() 
+
+### count proportions
+
+DSF.prop.tsfdi <- DSF.temp.tsfdi %>%
+  select(tsfdi, state) %>%
+  filter(tsfdi == "-30" | tsfdi == "-27.5" | tsfdi == "-25" | tsfdi == "-22.5" | tsfdi == "-20" | tsfdi == "-17.5" | tsfdi == "-15" | tsfdi == "-12.5" | tsfdi == "-10" | tsfdi == "-7.5" | tsfdi == "-5" | tsfdi == "-2.5" | tsfdi == "0" | tsfdi == "2.5" | tsfdi == "5" | tsfdi == "7.5" | tsfdi == "10" | tsfdi == "12.5" | tsfdi == "15" | tsfdi == "17.5" | tsfdi == "20" | tsfdi == "22.5" | tsfdi == "25" | tsfdi == "27.5" | tsfdi == "30") %>%
+  group_by(tsfdi) %>%
+  
+  summarize(ngreen = sum(state == "greening"),
+            nbrown = sum(state == "browning")) %>%
+  
+  ungroup()
+
+DSF.prop.tsd <- DSF.temp.tsd %>%
+  select(tsd, state) %>%
+  mutate(tsd = case_when(between(tsd, 0, 6) ~ 6,
+                         between(tsd, 7, 12) ~ 12,
+                         between(tsd, 13, 24) ~ 24,
+                         between(tsd, 25, 60) ~ 60,
+                         between(tsd, 61, 120) ~ 120,
+                         between(tsd, 121, 150) ~ 150)) %>%
+  group_by(tsd) %>%
+  
+  summarize(ngreen = sum(state == "greening"),
+            nbrown = sum(state == "browning")) %>%
+  
+  ungroup()
+
+DSF.prop.mar <- DSF.temp.mar %>%
+  select(mar, state) %>%
+
+    mutate(mar = case_when(between(mar, 600, 700) ~ 700,
+                         between(mar, 701, 800) ~ 800,
+                         between(mar, 900, 1000) ~ 1000,
+                         between(mar, 1100, 1200) ~ 1200,
+                         between(mar, 1201, 1589) ~ 1500)) %>%
+      
+        group_by(mar) %>%
+  
+  summarize(ngreen = sum(state == "greening"),
+            nbrown = sum(state == "browning")) %>%
+  
+  ungroup()
+
+DSF.prop.mat <- DSF.temp.mat %>%
+  select(mat, state) %>%
+
+      mutate(mat = case_when(between(mat, 11, 12) ~ 12,
+                         between(mat, 13, 14) ~ 14,
+                         between(mat, 15, 16) ~ 16,
+                         between(mat, 17, 18) ~ 18)) %>%
+      
+        group_by(mat) %>%
+  
+  summarize(ngreen = sum(state == "greening"),
+            nbrown = sum(state == "browning")) %>%
+  
+  ungroup()
+
+
+DSF.prop.list <- list(DSF.prop.tsfdi, DSF.prop.tsd, DSF.prop.mar, DSF.prop.mat)
+
+knitr::kable(DSF.prop.list, digits = 3)
+```
+
+
+```{r}#
+
+### Calculate percentage
+
+DSF.pct.tsfdi <- DSF.prop.tsfdi %>%
+  select(tsfdi, ngreen, nbrown) %>%
+  group_by(tsfdi, ngreen, nbrown) %>%
+  
+  summarize(total = sum(ngreen, nbrown)) %>%
+  mutate(percent = (ngreen / total))
+
+DSF.pct.tsd <- DSF.prop.tsd %>%
+  select(tsd, ngreen, nbrown) %>%
+  group_by(tsd, ngreen, nbrown) %>%
+  
+  summarize(total = sum(ngreen, nbrown)) %>%
+  mutate(percent = (ngreen / total))
+
+DSF.pct.mar <- DSF.prop.mar %>%
+  select(mar, ngreen, nbrown) %>%
+  group_by(mar, ngreen, nbrown) %>%
+  
+  summarize(total = sum(ngreen, nbrown)) %>%
+  mutate(percent = (ngreen / total))
+
+DSF.pct.mat <- DSF.prop.mat %>%
+  select(mat, ngreen, nbrown) %>%
+  group_by(mat, ngreen, nbrown) %>%
+  
+  summarize(total = sum(ngreen, nbrown)) %>%
+  mutate(percent = (ngreen / total))
+
+DSF.pct.list <- list(DSF.pct.tsfdi, DSF.pct.tsd, DSF.pct.mar, DSF.pct.mat)
+
+knitr::kable(DSF.pct.list, digits = 3)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+### WSF medians
+
+```{r}
+
+### predicted medians
+
+WSF.med.tsfdi <- post.WSF.tsfdi %>%
+  filter(tsfdi == "-16" | tsfdi == "-15" | tsfdi == "-12.5" | tsfdi == "-10" | tsfdi == "-7.5" | tsfdi == "-5" | tsfdi == "-2.5" | tsfdi == "0" | tsfdi == "2.5" | tsfdi == "5" | tsfdi == "7.5" | tsfdi == "10" | tsfdi == "12.5" | tsfdi == "15" | tsfdi == "17.5" | tsfdi == "20" | tsfdi == "22.5" | tsfdi == "26") %>%
+  group_by(tsfdi) %>%
+  
+      summarize(lwr95 = hpdi.vec(value, 0.95)[1],
+                  lwr50 = hpdi.vec(value, 0.50)[1],
+                  mid = median(value),
+                  upr50 = hpdi.vec(value, 0.50)[2],
+                  upr95 = hpdi.vec(value, 0.95)[2])
+
+WSF.med.tsd <- post.WSF.tsd %>%
+  mutate(tsd = case_when(between(tsd, 0, 6) ~ 6,
+                         between(tsd, 7, 12) ~ 12,
+                         between(tsd, 13, 24) ~ 24,
+                         between(tsd, 25, 60) ~ 60,
+                         between(tsd, 61, 120) ~ 120,
+                         between(tsd, 121, 150) ~ 150)) %>%
+  
+  group_by(tsd) %>%
+  
+      summarize(lwr95 = hpdi.vec(value, 0.95)[1],
+                  lwr50 = hpdi.vec(value, 0.50)[1],
+                  mid = median(value),
+                  upr50 = hpdi.vec(value, 0.50)[2],
+                  upr95 = hpdi.vec(value, 0.95)[2])
+
+WSF.med.mar <- post.WSF.mar %>%
+    mutate(mar = case_when(between(mar, 600, 700) ~ 700,
+                         between(mar, 701, 800) ~ 800,
+                         between(mar, 900, 1000) ~ 1000,
+                         between(mar, 1100, 1200) ~ 1200,
+                         between(mar, 1201, 1400) ~ 1400)) %>%
+  
+  group_by(mar) %>%
+  
+      summarize(lwr95 = hpdi.vec(value, 0.95)[1],
+                  lwr50 = hpdi.vec(value, 0.50)[1],
+                  mid = median(value),
+                  upr50 = hpdi.vec(value, 0.50)[2],
+                  upr95 = hpdi.vec(value, 0.95)[2])
+
+
+WSF.med.mat <- post.WSF.mat %>%
+      mutate(mat = case_when(between(mat, 11, 12) ~ 12,
+                         between(mat, 13, 14) ~ 14,
+                         between(mat, 15, 16) ~ 16,
+                         between(mat, 17, 18) ~ 18)) %>%
+
+  group_by(mat) %>%
+
+      summarize(lwr95 = hpdi.vec(value, 0.95)[1],
+                  lwr50 = hpdi.vec(value, 0.50)[1],
+                  mid = median(value),
+                  upr50 = hpdi.vec(value, 0.50)[2],
+                  upr95 = hpdi.vec(value, 0.95)[2])
+
+### combine data frames
+
+WSF.meds.summary <- list(WSF.med.tsfdi, WSF.med.tsd, WSF.med.mar, WSF.med.mat)
+
+knitr::kable(WSF.meds.summary, digits = 3)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r}#
+### what proportion of the posterior samples are < 0 at different values of TSFDI ?
+
+### create 'state' variable ### NOTE: this needs to be more detailed - need a buffer around zero (e.g. -5, 5) with a third category 'no change'
+
+WSF.temp.tsfdi <- post.WSF.tsfdi %>%
+  select(tsfdi, value) %>%
+  group_by(tsfdi) %>%
+    
+  mutate(state = ifelse(value < 0, "browning", "greening")) %>%
+
+ungroup() 
+
+WSF.temp.tsd <- post.WSF.tsd %>%
+  select(tsd, value) %>%
+  group_by(tsd) %>%
+    
+  mutate(state = ifelse(value < 0, "browning", "greening")) %>%
+
+ungroup() 
+
+WSF.temp.mar <- post.WSF.mar %>%
+  select(mar, value) %>%
+  group_by(mar) %>%
+    
+  mutate(state = ifelse(value < 0, "browning", "greening")) %>%
+
+ungroup() 
+
+WSF.temp.mat <- post.WSF.mat %>%
+  select(mat, value) %>%
+  group_by(mat) %>%
+    
+  mutate(state = ifelse(value < 0, "browning", "greening")) %>%
+
+ungroup() 
+
+### count proportions
+
+WSF.prop.tsfdi <- WSF.temp.tsfdi %>%
+  select(tsfdi, state) %>%
+  filter(tsfdi == "-30" | tsfdi == "-27.5" | tsfdi == "-25" | tsfdi == "-22.5" | tsfdi == "-20" | tsfdi == "-17.5" | tsfdi == "-15" | tsfdi == "-12.5" | tsfdi == "-10" | tsfdi == "-7.5" | tsfdi == "-5" | tsfdi == "-2.5" | tsfdi == "0" | tsfdi == "2.5" | tsfdi == "5" | tsfdi == "7.5" | tsfdi == "10" | tsfdi == "12.5" | tsfdi == "15" | tsfdi == "17.5" | tsfdi == "20" | tsfdi == "22.5" | tsfdi == "25" | tsfdi == "27.5" | tsfdi == "30") %>%
+  group_by(tsfdi) %>%
+  
+  summarize(ngreen = sum(state == "greening"),
+            nbrown = sum(state == "browning")) %>%
+  
+  ungroup()
+
+WSF.prop.tsd <- WSF.temp.tsd %>%
+  select(tsd, state) %>%
+  mutate(tsd = case_when(between(tsd, 0, 6) ~ 6,
+                         between(tsd, 7, 12) ~ 12,
+                         between(tsd, 13, 24) ~ 24,
+                         between(tsd, 25, 60) ~ 60,
+                         between(tsd, 61, 120) ~ 120,
+                         between(tsd, 121, 150) ~ 150)) %>%
+  group_by(tsd) %>%
+  
+  summarize(ngreen = sum(state == "greening"),
+            nbrown = sum(state == "browning")) %>%
+  
+  ungroup()
+
+WSF.prop.mar <- WSF.temp.mar %>%
+  select(mar, state) %>%
+
+    mutate(mar = case_when(between(mar, 600, 700) ~ 700,
+                         between(mar, 701, 800) ~ 800,
+                         between(mar, 900, 1000) ~ 1000,
+                         between(mar, 1100, 1200) ~ 1200,
+                         between(mar, 1201, 1589) ~ 1500)) %>%
+      
+        group_by(mar) %>%
+  
+  summarize(ngreen = sum(state == "greening"),
+            nbrown = sum(state == "browning")) %>%
+  
+  ungroup()
+
+WSF.prop.mat <- WSF.temp.mat %>%
+  select(mat, state) %>%
+
+      mutate(mat = case_when(between(mat, 11, 12) ~ 12,
+                         between(mat, 13, 14) ~ 14,
+                         between(mat, 15, 16) ~ 16,
+                         between(mat, 17, 18) ~ 18)) %>%
+      
+        group_by(mat) %>%
+  
+  summarize(ngreen = sum(state == "greening"),
+            nbrown = sum(state == "browning")) %>%
+  
+  ungroup()
+
+
+WSF.prop.list <- list(WSF.prop.tsfdi, WSF.prop.tsd, WSF.prop.mar, WSF.prop.mat)
+
+knitr::kable(WSF.prop.list, digits = 3)
+```
+
+
+```{r}#
+
+### Calculate percentage
+
+WSF.pct.tsfdi <- WSF.prop.tsfdi %>%
+  select(tsfdi, ngreen, nbrown) %>%
+  group_by(tsfdi, ngreen, nbrown) %>%
+  
+  summarize(total = sum(ngreen, nbrown)) %>%
+  mutate(percent = (ngreen / total))
+
+WSF.pct.tsd <- WSF.prop.tsd %>%
+  select(tsd, ngreen, nbrown) %>%
+  group_by(tsd, ngreen, nbrown) %>%
+  
+  summarize(total = sum(ngreen, nbrown)) %>%
+  mutate(percent = (ngreen / total))
+
+WSF.pct.mar <- WSF.prop.mar %>%
+  select(mar, ngreen, nbrown) %>%
+  group_by(mar, ngreen, nbrown) %>%
+  
+  summarize(total = sum(ngreen, nbrown)) %>%
+  mutate(percent = (ngreen / total))
+
+WSF.pct.mat <- WSF.prop.mat %>%
+  select(mat, ngreen, nbrown) %>%
+  group_by(mat, ngreen, nbrown) %>%
+  
+  summarize(total = sum(ngreen, nbrown)) %>%
+  mutate(percent = (ngreen / total))
+
+WSF.pct.list <- list(WSF.pct.tsfdi, WSF.pct.tsd, WSF.pct.mar, WSF.pct.mat)
+
+knitr::kable(WSF.pct.list, digits = 3)
+```
+
+
+
+
+
+
+
+
+
+

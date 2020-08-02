@@ -1,0 +1,475 @@
+---
+title: "SYDBIO_GAMs"
+author: "Eli Bendall & Micheal Bedward"
+date: "02/08/2020"
+output:
+  word_document: default
+  html_document: default
+---
+
+```{r setup, include=TRUE, message=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(here)
+library(dplyr)
+library(ggplot2)
+library(readxl)
+library(stringr)
+library(tidyr)
+library(stats)
+library(purrr)
+library(rstan)
+library(brms)
+library(mgcv)
+library(future)
+
+#spatial library
+library(class)
+library(spdep)
+library(RANN)
+library(sf)
+library(sp)
+library(lwgeom)
+library(spatialEco)
+
+
+#These options help Stan run faster:
+
+rstan_options(auto_write = TRUE)
+options(mc.cores = parallel::detectCores())
+
+# Make sure the scales package is available (it should be if ggplot is installed)
+requireNamespace("scales")
+
+# Default graph theme - white background
+theme_set( theme_bw() )
+
+set.seed(42)
+
+
+# Set to TRUE to force models to be refitted
+REFIT_MODELS <- FALSE
+
+
+# Create a folder for fitted models if one does not already exist
+FittedModelsPath <- here("fitted_models_SYDBIO")
+if (!dir.exists(FittedModelsPath)) {
+  dir.create(FittedModelsPath)
+}
+
+
+# Load brms if it is installed (requires Stan software and the rstan package).
+# If not installed, HAS_BRMS will be set to FALSE.
+HAS_BRMS <- suppressWarnings(
+  require("brms", quietly = TRUE)
+)
+
+
+###### Some helper functions #####
+
+# Calculate standard page sizes
+pagesize <- function(size = c("A4", "A3", "A2", "A1", "A0"), 
+                     orientation = c("portrait", "landscape"),
+                     units = c("cm", "mm")) {
+  
+  size <- match.arg(size)
+  orientation <- match.arg(orientation)
+  units <- match.arg(units)
+  
+  alpha <- 1000 * 2^(1/4)
+  i <- as.integer(substr(size, 2, 2))
+  long <- alpha * 2^(-i/2)
+  
+  page <- switch(
+    orientation,
+    portrait = c(width = long / sqrt(2), height = long),
+    landscape = c(width = long, height = long / sqrt(2))
+  )
+  
+  page <- round(page)
+  if (units == "cm") page <- page / 10
+  
+  page <- c(as.list(page), units = units)
+  class(page) <- "pagesize"
+  
+  page
+}
+
+
+
+# Save a graph to a PDF file
+gg_pdf <- function(plot, filename, size = pagesize("A4", "landscape", "cm")) {
+  
+  if (!inherits(size, "pagesize")) stop("The size argument should be a pagesize (list) object")
+  
+  ggsave(
+    filename, 
+    plot, 
+    width = size$width,
+    height = size$height,
+    units = size$units)
+}
+
+
+# Calculate highest posterior density interval for a vector of values
+hpdi.vec <- function (x, prob = 0.95) {
+  n <- length(x)
+  if (n <= 1) stop("x must have more than 1 element")
+  x <- sort(x)
+
+  gap <- max(1, min(n - 1, round(n * prob)))
+  init <- 1:(n - gap)
+
+  inds <- which.min(x[init + gap] - x[init])
+
+  out <- c(lower = x[inds], upper = x[inds + gap])
+  out
+}
+
+
+
+
+
+```
+
+
+## Read in data
+
+```{r}
+
+### Load stack
+
+DSF.mask <- raster::stack("DSF.mask.SYD.2.tif")
+
+WSF.mask <- raster::stack("WSF.mask.SYD.2.tif")
+
+### names of .value reflect only the orignal sf object, need to change names of raster value columns for continuity
+
+names(DSF.mask) <- c("green", "TSD", "TSFDI", "veg", "bio01", "bio12")
+
+names(WSF.mask) <- c("green", "TSD", "TSFDI", "veg", "bio01", "bio12")
+
+```
+
+
+```{r}
+### Convert stack to data frame, retaining x y
+
+DAT.SYD.DSF.temp <- raster::as.data.frame(DSF.mask, xy = TRUE)
+
+
+### filter NA
+
+DAT.SYD.DSF.temp2 <- DAT.SYD.DSF.temp %>%
+    filter(!is.na(green)) %>%
+    filter(!is.na(TSD)) %>%
+    filter(!is.na(TSFDI)) %>%
+    filter(!is.na(bio01)) %>%
+    filter(!is.na(bio12)) 
+
+### filter TSFDI values to -10, 10
+
+DAT.SYD.DSF.temp3 <- DAT.SYD.DSF.temp2 #%>%
+
+
+### scale index
+
+DAT.SYD.DSF.temp3$green[DAT.SYD.DSF.temp3$green > 201] <- 201
+
+DAT.SYD.DSF.temp3$green <- (DAT.SYD.DSF.temp3$green*0.01)+(-1.01)
+
+
+### Randomly sample 10000 rows
+
+DAT.SYD.DSF.a <- as.data.frame(DAT.SYD.DSF.temp3[sample(nrow(DAT.SYD.DSF.temp3), 150000), ])
+
+DAT.SYD.DSF.b <- as.data.frame(DAT.SYD.DSF.temp3[sample(nrow(DAT.SYD.DSF.temp3), 150000), ])
+
+DAT.SYD.DSF.c <- as.data.frame(DAT.SYD.DSF.temp3[sample(nrow(DAT.SYD.DSF.temp3), 150000), ])
+
+
+### Repeat for WSF
+  
+DAT.SYD.WSF.temp <- raster::as.data.frame(WSF.mask, xy = TRUE)
+
+DAT.SYD.WSF.temp2 <- DAT.SYD.WSF.temp %>%
+    filter(!is.na(green)) %>%
+    filter(!is.na(TSD)) %>%
+    filter(!is.na(TSFDI)) %>%
+    filter(!is.na(bio01)) %>%
+    filter(!is.na(bio12)) 
+
+DAT.SYD.WSF.temp3 <- DAT.SYD.WSF.temp2 #%>%
+
+
+### scale index
+
+DAT.SYD.WSF.temp3$green[DAT.SYD.WSF.temp3$green > 201] <- 201
+
+DAT.SYD.WSF.temp3$green <- (DAT.SYD.WSF.temp3$green*0.01)+(-1.01)
+
+
+DAT.SYD.WSF.a <- as.data.frame(DAT.SYD.WSF.temp3[sample(nrow(DAT.SYD.WSF.temp3), 150000), ])
+
+DAT.SYD.WSF.b <- as.data.frame(DAT.SYD.WSF.temp3[sample(nrow(DAT.SYD.WSF.temp3), 150000), ])
+
+DAT.SYD.WSF.c <- as.data.frame(DAT.SYD.WSF.temp3[sample(nrow(DAT.SYD.WSF.temp3), 150000), ])
+
+```
+
+```{r}
+
+DAT.SYD.DSF.a.tst <- DAT.SYD.DSF.a %>%
+
+  mutate(TSFDI = factor(TSFDI))
+
+
+
+ggplot(data = DAT.SYD.DSF.a.tst, aes(x = green, col = TSFDI)) +
+  geom_density()
+```
+
+```{r}
+
+DAT.SYD.DSF.b.tst <- DAT.SYD.DSF.b %>%
+
+  mutate(TSFDI = factor(TSFDI))
+
+
+
+ggplot(data = DAT.SYD.DSF.b.tst, aes(x = green, col = TSFDI)) +
+  geom_density()
+```
+
+```{r}
+
+DAT.SYD.DSF.c.tst <- DAT.SYD.DSF.c %>%
+
+  mutate(TSFDI = factor(TSFDI))
+
+
+
+ggplot(data = DAT.SYD.DSF.c.tst, aes(x = green, col = TSFDI)) +
+  geom_density()
+```
+
+```{r}
+
+DAT.SYD.WSF.a.tst <- DAT.SYD.WSF.a %>%
+
+  mutate(TSFDI = factor(TSFDI))
+
+
+
+ggplot(data = DAT.SYD.WSF.a.tst, aes(x = green, col = TSFDI)) +
+  geom_density()
+```
+
+
+```{r}
+
+DAT.SYD.WSF.b.tst <- DAT.SYD.WSF.b %>%
+
+  mutate(TSFDI = factor(TSFDI))
+
+
+
+ggplot(data = DAT.SYD.WSF.b.tst, aes(x = green, col = TSFDI)) +
+  geom_density()
+```
+
+
+```{r}
+
+DAT.SYD.WSF.c.tst <- DAT.SYD.WSF.c %>%
+
+  mutate(TSFDI = factor(TSFDI))
+
+
+
+ggplot(data = DAT.SYD.WSF.c.tst, aes(x = green, col = TSFDI)) +
+  geom_density()
+```
+
+
+
+
+
+
+## Create dataframe and factors
+
+```{r}
+
+DAT.SYD.DSF.all <- DAT.SYD.DSF.a %>%
+  dplyr::select(tsd = TSD,
+         green = green,
+         tsfdi = TSFDI,
+         mat = bio01,
+         mar = bio12,
+         x = x,
+         y = y)
+
+
+### recalculate TSD
+
+DAT.SYD.DSF.all$tsd <- 327 - DAT.SYD.DSF.all$tsd
+
+
+DAT.SYD.WSF.all <- DAT.SYD.WSF.c %>%
+  dplyr::select(tsd = TSD,
+         green = green,
+         tsfdi = TSFDI,
+         mat = bio01,
+         mar = bio12,
+         x = x,
+         y = y)
+
+
+### recalculate TSD
+
+DAT.SYD.WSF.all$tsd <- 327 - DAT.SYD.WSF.all$tsd
+
+### remove clutter from workspace
+
+rm(DAT.SYD.DSF.temp, DAT.SYD.DSF.temp2, DAT.SYD.DSF.temp3)
+rm(DAT.SYD.WSF.temp, DAT.SYD.WSF.temp2, DAT.SYD.WSF.temp3, DSF.mask, WSF.mask)
+  
+```
+
+
+## Check for missing values
+
+```{r}
+colSums( is.na(DAT.SYD.DSF.all) )
+```
+
+
+```{r}
+colSums( is.na(DAT.SYD.WSF.all) )
+```
+
+
+```{r}
+### Subsample to points no closer than 300m distance
+
+library(spatialEco)
+library(sp)
+coordinates(DAT.SYD.DSF.all) <- ~x+y
+
+sub.DAT.SYD.DSF <- subsample.distance(DAT.SYD.DSF.all, size = 12000, d = 0.003, echo = FALSE)  
+
+DAT.SYD.DSF_300m <- as.data.frame(sub.DAT.SYD.DSF)
+
+save(DAT.SYD.DSF_300m, file = "DAT.SYD.DSF_300m.2.RData")
+    
+```
+
+```{r}
+DAT.SYD.DSF_300m.tst <- DAT.SYD.DSF_300m %>%
+  mutate(tsfdi = factor(tsfdi))
+
+ggplot(data = DAT.SYD.DSF_300m.tst, aes(x = green, col = tsfdi)) +
+  geom_density()
+```
+
+
+
+```{r}
+
+### Repeat for WSF
+
+coordinates(DAT.SYD.WSF.all) <- ~x+y
+
+sub.DAT.SYD.WSF.a <- subsample.distance(DAT.SYD.WSF.all, size = 10000, d = 0.003, echo = FALSE)
+
+sub.DAT.SYD.WSF.b <- subsample.distance(DAT.SYD.WSF.all, size = 10000, d = 0.003, echo = FALSE)
+
+sub.DAT.SYD.WSF.c <- subsample.distance(DAT.SYD.WSF.all, size = 10000, d = 0.003, echo = FALSE)
+
+DAT.SYD.WSF_300m <- as.data.frame(sub.DAT.SYD.WSF.a)
+
+save(DAT.SYD.WSF_300m, file = "DAT.SYD.WSF_300m.2.RData")
+
+
+```
+
+```{r}
+DAT.SYD.WSF_300m.tst <- DAT.SYD.WSF_300m %>%
+  filter(tsfdi > -15) %>%
+  mutate(tsfdi = factor(tsfdi))
+
+ggplot(data = DAT.SYD.WSF_300m.tst, aes(x = green, col = tsfdi)) +
+  geom_density()
+```
+### run model 1 for DSF
+
+```{r}
+
+DSF.model.SYD <- gam(green ~ te(x, y, k = 30) + s(tsd) + s(tsfdi) + s(mat) + s(mar), 
+          data = DAT.SYD.DSF_300m)
+
+save(DSF.model.SYD, file = "DSF.model.SYD.2.RData")
+
+
+```
+
+Model summary (similar to that from lme4::glmer). We only use this as a sanity check - not directly for inference.
+
+```{r}
+
+summary(DSF.model.SYD)
+
+```
+
+These values are very similar to those produced by lme4::glmer.
+
+
+Graphical summaries of fitted parameters (densities and trace plots). Again these are mostly for model checking.
+
+```{r}
+
+plot(DSF.model.SYD, ask = FALSE)
+
+```
+
+```{r}
+### model 1
+
+DAT.SYD.WSF_300m <- DAT.SYD.WSF_300m %>%
+  filter(tsfdi > -15)
+
+save(DAT.SYD.WSF_300m, file = "DAT.SYD.WSF_300m.2.RData")
+```
+### run model WSF
+
+```{r}
+
+WSF.model.SYD <- gam(green ~ te(x, y, k = 30) + s(tsd) + s(tsfdi) + s(mat) + s(mar), 
+          data = DAT.SYD.WSF_300m)
+
+save(WSF.model.SYD, file = "WSF.model.SYD.2.RData")
+
+```
+
+Model summary (similar to that from lme4::glmer). We only use this as a sanity check - not directly for inference.
+
+
+
+```{r}
+
+summary(WSF.model.SYD)
+
+```
+
+These values are very similar to those produced by lme4::glmer.
+
+
+Graphical summaries of fitted parameters (densities and trace plots). Again these are mostly for model checking.
+
+```{r}
+
+plot(WSF.model.SYD, ask = FALSE)
+
+```
+
+

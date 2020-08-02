@@ -1,0 +1,389 @@
+---
+title: "spei_gis"
+author: "Mitchell Stares & Eli Bendall"
+date: "12/03/2019"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+## Libraries
+
+### NOTE this is modified SPEI calculation, V2 - 12/03/2019
+
+```{r}
+library(raster) # Main package used for everything raster
+library(tidyverse) # Normally used for data manipulations
+library(rgdal) # Used mostly to read in the NSW polygon
+library(sp) # Not currently needed but a useful package for vector data
+library(sf) # Not currently needed but a quicker version of SP that has limited compatibility with most commands
+library(RNetCDF) # NetCDF4 package
+library(ncdf4) # NetCDF4 package
+library(SPEI) # Used for the SPEI calculation in the second loop
+library(zoo) #Used for timescale (yearmon()) stuff
+library(nnet)
+library(stats)
+library(fasterize)
+```
+
+## PMFAO Loop  (have modified, EB, function is now set to "sum") 
+This section creates the PMFAO (Precip - ET) raster for each year taking from the input folders (rain and fao). The loop also takes a NSW layer input (taken from Firelab Sharedrive) in order to crop the raster stacks to reduce processing time. Without the crop, the processing was taking along time. 
+
+The loop:
+The loop takes the list of files from the Rain folder using each entry in the list as the iterative variable. 
+Each entry in the list is read in as a raster stack and then immediately cropped to the NSW extent. This is repeated for the FAO folder, which also uses the above function to calculate the monthly average ET from the daily values.  
+These are then subtracted from each other to create the PMFAO file, which is written to a raster using the string split function to create a unique name for each layer.  
+
+Strsplit() - split the individual character string by a specific character. In these examples the "/" is used followed by the "_". The second strsplit is used to split the final string from the first strsplit into two so the individual year can be obtained.
+
+
+
+```{R}
+
+P.nc.lst<-list.files(path="C:/Users/e_ben/OneDrive - University of Wollongong/PhD/R/SPEI 3/RAIN", pattern="rai",full.names = TRUE, recursive=TRUE, include.dirs = TRUE)
+FAO.nc.lst<-list.files(path="C:/Users/e_ben/OneDrive - University of Wollongong/PhD/R/SPEI 3/FAO", pattern="sho",full.names = TRUE, recursive=TRUE, include.dirs = TRUE)
+bioregions <- readOGR(dsn="C:/Users/e_ben/OneDrive - University of Wollongong/PhD/R/SPEI 3/BOUNDARIES", layer="IBRA_studyregions_ELI_2_rpj.")
+
+# This took about 40 minutes on Mitch's computer
+
+for(d in 1:length(P.nc.lst))
+{
+  P.tmp.r<-stack(P.nc.lst[d])
+  P.tmp.crop <- crop(P.tmp.r, bioregions)
+  FAO.tmp.r<-stack(FAO.nc.lst[d])
+  FAO.tmp.crop <- crop(FAO.tmp.r, bioregions)
+  indicies <- format(as.Date(names(FAO.tmp.crop), format = "X%Y.%m.%d"), format = "%m")
+  indicies <- as.numeric(indicies)
+  FAO.mnth.r <- stackApply(FAO.tmp.crop, indicies, fun = sum)
+  PMFAO.tmp.r<-P.tmp.crop-FAO.mnth.r
+  tmpfname<-strsplit(P.nc.lst[d],"/") 
+  tmpfnamesplit <- strsplit(tmpfname[[1]][9], "_") #Note: Change the index here to reflect the end of strsplit for your filepath length. Eli's is [9], Mitch's is [7]
+  writeRaster(PMFAO.tmp.r,paste0("C:/Users/e_ben/OneDrive - University of Wollongong/PhD/R/SPEI 3/PMFAO2/","PMFAO_",tmpfnamesplit[[1]][1],".tif"), overwrite=TRUE)
+}
+
+```
+
+
+## SPEI Calculation  
+
+```{R}
+
+## list PMFAO files
+PMFAO.lst<-list.files(path="C:/Users/e_ben/OneDrive - University of Wollongong/PhD/R/SPEI 3/PMFAO2", pattern="PMFAO",full.names = TRUE)
+
+PMFAO.tmp.s.all <- stack(PMFAO.lst)
+
+## Apply function - note square brackets are important 
+funSPEI <- function(x, scale=12, na.rm=TRUE) {
+  as.numeric((spei(x, scale=scale, na.rm=na.rm))$fitted)
+}
+
+## Calculate SPEI with function
+SPEI.s.all <- calc(PMFAO.tmp.s.all, fun = funSPEI)
+
+## Create vector of dates
+dates <- format(seq(as.Date("1960-01-01"), as.Date("2017-12-01"), by="month"), '%Y%m')
+
+## Set date names to SPEI file
+SPEI.dates <- setNames(SPEI.s.all, dates)
+
+## stack SPEI with dates
+SPEI.subset <- stack(SPEI.dates)
+
+## create vector of names for final SPEI output
+SPEI.names <- names(SPEI.subset)
+
+## write SPEI files to folder with 'suffix' as date names
+writeRaster(SPEI.s.all, filename="C:/Users/e_ben/OneDrive - University of Wollongong/PhD/R/SPEI 3/SPEI_dates.tst2/SPEI", overwrite=TRUE, bylayer=TRUE, suffix=SPEI.names, format="GTiff")
+
+```
+
+
+## Subset to 6 Months if needed (dont need this currently so ignore)
+
+```{r}#
+SPEI.lst<-list.files(path="C:/Users/e_ben/OneDrive - University of Wollongong/PhD/R/SPEI 3/SPEI_dates.tst", pattern="SPEI", full.names = TRUE)
+
+SPEI.subset <- SPEI.lst[seq(6, length(SPEI.lst), 6)]
+
+SPEI.subset <- stack(SPEI.subset)
+
+SPEI.names <- names(SPEI.subset)
+
+writeRaster(SPEI.subset, filename="C:/Users/e_ben/OneDrive - University of Wollongong/PhD/R/SPEI 3/SPEI_dates.tst/SPEI", overwrite=TRUE, bylayer=TRUE, suffix=SPEI.names, format="GTiff")
+
+
+```
+
+### Drought Frequency Loop
+
+- stack SPEI list > write function for SPEI threshold value > apply function and then calc > write raster
+
+```{r}
+
+SPEI.lst<-list.files(path="C:/Users/e_ben/OneDrive - University of Wollongong/PhD/R/SPEI 3/SPEI_8917", pattern="SPEI", full.names = TRUE)
+
+r <- stack(SPEI.lst)
+
+
+drought.tmp <- function(x, t = -1.5) { 
+    sum(x < t, na.rm = TRUE)
+  }
+
+drought.freq.tmp <- calc(r, fun=drought.tmp)
+
+
+writeRaster(drought.freq.tmp, "C:/Users/e_ben/OneDrive - University of Wollongong/PhD/R/SPEI 3/DROUGHT_FREQ/df1989-2017_-1.5.tif", format = "GTiff", overwrite=TRUE)
+
+```
+
+### Time-since-drought loop
+
+Follows smilar logic to the 'drought frequency loop' above, although here we are wanting the index position of the last drought. Once obtained we can reclassify the index position to something relevant, e.g. '6 months, 12 months, 48 month etc.' to give us a 'time-since-drought' raster.
+
+Here are the steps:
+
+(1) Create new folder "SPEI_6m_8813" and manually copy over the files from start 1988 to end 2012, giving 50 files in the new folder.
+
+(2) create list
+
+(3) stack list
+
+(4) write function - this is a modification of the 'drought freq' function above. 
+
+```{r}
+SPEI.lst<-list.files(path="C:/Users/e_ben/OneDrive - University of Wollongong/PhD/R/SPEI 3/SPEI_8917", pattern="SPEI",full.names = TRUE)
+
+r <- stack(SPEI.lst)
+
+
+last.drought <- function(x, t = -1.0) {
+  imax <- max(which(x<t)) 
+  ifelse(length(imax) == 0, 0, imax)
+  
+}
+
+
+
+
+time.since.drought <- calc(r, fun=last.drought)
+
+writeRaster(time.since.drought, "C:/Users/e_ben/OneDrive - University of Wollongong/PhD/R/SPEI 3/DROUGHT_FREQ/TSD_1989-2017_-1.0.tif", format = "GTiff", overwrite=TRUE)
+
+```
+
+
+### TSF Difference Index (SYDNEY BIOREGION)
+
+```{r}
+
+### read in shapefile
+
+SYD.early.shp <- st_read("SYDregion_early_1.shp")
+
+### replace FireYear season with actual year
+
+SYD.early.shp$FireYear  <- str_sub(SYD.early.shp$FireYear, - 6, -3)
+
+SYD.early.shp$FireYear <- as.numeric(SYD.early.shp$FireYear)
+
+## read in extent object
+extent.object<-raster("SYDregion_green_dbj_mosaic.tif")
+
+#create new raster from from extent object
+new.raster <- raster(extent.object)
+
+## assign new value of zero
+new.raster[new.raster] <- 0
+
+blank.raster <- new.raster
+
+
+## rasterize shp with 'max' function
+SYDearlyTSF <- fasterize(SYD.early.shp, blank.raster, field="FireYear", fun='max', background=NA)
+
+
+## calculate TSF
+
+SYDearlyTSF <- 1990 - SYDearlyTSF
+
+
+
+## repeat for next shp
+
+### read in shapefile
+
+SYD.late.shp <- st_read("SYDregion_late_1.shp")
+
+
+### replace FireYear season with actual year
+
+SYD.late.shp$FireYear  <- str_sub(SYD.late.shp$FireYear, - 6, -3)
+
+SYD.late.shp$FireYear <- as.numeric(SYD.late.shp$FireYear)
+
+
+## rasterize shp with 'max' function
+SYDlateTSF <- fasterize(SYD.late.shp, blank.raster, field="FireYear", fun='max', background=NA)
+
+## calculate TSF
+
+SYDlateTSF <- 2017 - SYDlateTSF
+
+
+## calculate TSF difference index
+
+SYDregion_TSFDI <- SYDlateTSF - SYDearlyTSF
+
+
+## write file
+
+
+writeRaster(SYDregion_TSFDI, "SYDregion_TSFDI_14JUL20.tif", format = "GTiff", overwrite=TRUE)
+
+```
+
+
+### SEC Bioregion (NSW)
+
+```{r}
+
+### read in shapefile
+
+SEC.nsw.early.shp <- st_read("SECregion_fires_early_nsw.shp")
+
+### replace FireYear season with actual year
+
+SEC.nsw.early.shp$FireYear  <- str_sub(SEC.nsw.early.shp$FireYear, - 6, -3)
+
+SEC.nsw.early.shp$FireYear <- as.numeric(SEC.nsw.early.shp$FireYear)
+
+
+## read in extent object
+extent.object<-raster("SECregion_green_APR5th.tif")
+
+#create new raster from from extent object
+new.raster <- raster(extent.object)
+
+## assign new value of zero
+new.raster[new.raster] <- 0
+
+blank.raster <- new.raster
+
+
+## rasterize shp with 'max' function
+SECnswearlyTSF <- fasterize(SEC.nsw.early.shp, blank.raster, field="FireYear", fun='max', background=NA)
+
+
+## calculate TSF
+
+SECnswearlyTSF <- 1990 - SECnswearlyTSF
+
+
+
+## repeat for next shp
+
+SEC.nsw.late.shp <- st_read("SECregion_fires_nsw_late.shp")
+
+### replace FireYear season with actual year
+
+SEC.nsw.late.shp$FireYear  <- str_sub(SEC.nsw.late.shp$FireYear, - 6, -3)
+
+SEC.nsw.late.shp$FireYear <- as.numeric(SEC.nsw.late.shp$FireYear)
+
+
+
+
+## rasterize shp with 'max' function
+SECnswlateTSF <- fasterize(SEC.nsw.late.shp, blank.raster, field="FireYear", fun='max', background=NA)
+
+
+## calculate TSF
+
+SECnswlateTSF <- 2017 - SECnswlateTSF
+
+
+## calculate TSF difference index
+
+SECregion_nsw_TSFDI <- SECnswlateTSF - SECnswearlyTSF
+
+
+## write file
+
+writeRaster(SECregion_nsw_TSFDI, "SECregion_nsw_TSFDI_14JUL29.tif", format = "GTiff", overwrite=TRUE)
+
+
+
+```
+
+
+## SEC Bioregion (VIC)
+
+```{r}
+
+### read in shapefile
+
+SEC.vic.early.shp <- st_read("SECregion_fires_vic_early2.shp")
+
+SEC.vic.early.shp$SEASON2 <- as.numeric(SEC.vic.early.shp$SEASON2)
+
+
+
+## read in extent object
+extent.object<-raster("SECregion_green_APR5th.tif")
+
+#create new raster from from extent object
+new.raster <- raster(extent.object)
+
+## assign new value of zero
+new.raster[new.raster] <- 0
+
+blank.raster <- new.raster
+
+
+## rasterize shp with 'max' function
+SECvicearlyTSF <- fasterize(SEC.vic.early.shp, blank.raster, field="SEASON2", fun='max', background=NA)
+
+
+## calculate TSF
+
+SECvicearlyTSF <- 1990 - SECvicearlyTSF
+
+
+
+## repeat for next shp
+
+SEC.vic.late.shp <- st_read("SECregion_fires_vic_late2.shp")
+
+
+SEC.vic.late.shp$SEASON2 <- as.numeric(SEC.vic.late.shp$SEASON2)
+
+
+
+## rasterize shp with 'max' function
+SECviclateTSF <- fasterize(SEC.vic.late.shp, blank.raster, field="SEASON2", fun='max', background=NA)
+
+
+## calculate TSF
+
+SECviclateTSF <- 2017 - SECviclateTSF
+
+
+## calculate TSF difference index
+
+SECregion_vic_TSFDI <- SECviclateTSF - SECvicearlyTSF
+
+
+## write file
+
+writeRaster(SECregion_vic_TSFDI, "SECregion_vic_TSFDI3_14JUL2020.tif", format = "GTiff", overwrite=TRUE)
+
+
+```
+
+```{r}
+SECregion_TSFDI_comb <- raster::merge(SECregion_vic_TSFDI, SECregion_nsw_TSFDI)
+
+writeRaster(SECregion_TSFDI_comb, "SECregion_TSFDI_comb_14JUL2020.tif", format = "GTiff", overwrite=TRUE)
+```
+
